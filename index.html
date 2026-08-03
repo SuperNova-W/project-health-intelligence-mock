@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#eef1ea" />
+    <title>Project Health Intelligence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <div class="brand-name">Project Health</div>
+            <div class="brand-caption">INTELLIGENCE</div>
+          </div>
+        </div>
+
+        <div class="workspace-switcher">
+          <div class="workspace-avatar">AC</div>
+          <div class="workspace-copy">
+            <span class="eyebrow">Workspace</span>
+            <strong>App Dev Club</strong>
+          </div>
+          <button class="icon-button subtle" aria-label="Switch workspace" title="Switch workspace">⌄</button>
+        </div>
+
+        <nav class="primary-nav" id="primary-nav">
+          <div class="nav-section-label">Review</div>
+          <button class="nav-item active" data-view="overview"><span class="nav-icon" data-icon="grid"></span><span>Overview</span><span class="nav-count">3</span></button>
+          <button class="nav-item" data-view="projects"><span class="nav-icon" data-icon="folder"></span><span>Projects</span></button>
+          <button class="nav-item" data-view="review-log"><span class="nav-icon" data-icon="clipboard"></span><span>Review log</span></button>
+          <div class="nav-section-label nav-section-spaced">Manage</div>
+          <button class="nav-item" data-view="boundaries"><span class="nav-icon" data-icon="waypoints"></span><span>Project boundaries</span><span class="nav-dot"></span></button>
+          <button class="nav-item" data-view="rules"><span class="nav-icon" data-icon="sliders"></span><span>Signal rules</span></button>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+
+        <div class="coverage-card">
+          <div class="coverage-topline"><span class="coverage-icon" data-icon="database"></span><span>Data coverage</span><span class="coverage-percent">97%</span></div>
+          <div class="coverage-bar"><span></span></div>
+          <p>Last sync completed 26 min ago</p>
+          <button class="text-button" id="coverage-details">View data quality <span>→</span></button>
+        </div>
+        <div class="sidebar-footer">
+          <div class="user-avatar">JK</div>
+          <div class="user-copy"><strong>Jordan Kim</strong><span>Portfolio lead</span></div>
+          <button class="icon-button subtle" aria-label="Account menu">•••</button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumbs"><span>Project Health Intelligence</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb-current">Overview</strong></div>
+          <div class="topbar-actions">
+            <span class="live-status"><span class="live-dot"></span>Live data</span>
+            <button class="topbar-icon" aria-label="Notifications" title="Notifications"><span data-icon="bell"></span><span class="notification-dot"></span></button>
+            <button class="avatar-button" aria-label="Open profile">JK</button>
+          </div>
+        </header>
+
+        <div id="app-view" class="view-container"></div>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"><span class="toast-check" data-icon="check"></span><span id="toast-message">Feedback recorded</span></div>
+    <div class="modal-backdrop" id="modal-backdrop" hidden>
+      <section class="feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title">
+        <button class="modal-close" id="modal-close" aria-label="Close feedback dialog">×</button>
+        <div class="modal-icon" data-icon="message"></div>
+        <span class="eyebrow">Weekly review note</span>
+        <h2 id="feedback-title">Add context to this warning</h2>
+        <p id="feedback-project-name">Tell the team what leadership should know about this project.</p>
+        <div class="feedback-options" id="feedback-options">
+          <button data-feedback="Risk confirmed"><span data-icon="check-circle"></span>Risk confirmed</button>
+          <button data-feedback="Expected project cycle"><span data-icon="calendar"></span>Expected cycle</button>
+          <button data-feedback="Data quality problem"><span data-icon="triangle"></span>Data quality issue</button>
+          <button data-feedback="Planned pause"><span data-icon="pause"></span>Planned pause</button>
+        </div>
+        <label class="modal-label" for="feedback-note">Optional note</label>
+        <textarea id="feedback-note" rows="3" placeholder="Add a short explanation for the next review..."></textarea>
+        <div class="modal-actions"><button class="secondary-button" id="modal-cancel">Cancel</button><button class="primary-button" id="modal-save">Save review note <span>→</span></button></div>
+      </section>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
