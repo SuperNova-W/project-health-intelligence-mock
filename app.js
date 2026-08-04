@@ -33,82 +33,150 @@ const projects = [
   {
     id: 'member-portal', name: 'Member Portal', short: 'MP', team: 'Product Experience', repo: 'member-portal', status: 'At risk', statusClass: 'risk', signal: 'PR review queue is aging', signalDetail: '4 PRs · oldest 18 days', lastActivity: 'Yesterday', trend: 'down',
     weeks: [0.8, 0.7, 0.75, 0.6, 0.5, 0.3, 0.2, 0.15], flagFrom: 4,
+    seriesBaselines: { openPRs: [1, 4], reviewLatency: [2.1, 5.4], contributors: [5, 2] },
     description: 'Self-service member onboarding and account management.',
-    metrics: { activeDays: '6 of 21', openPRs: '4', oldestPR: '18 days', reviewLatency: '5.4 days', contributors: '2', mergedThisWeek: '1' },
     boundary: { rootTeam: 'Product Experience', subteams: ['Member Portal Core', 'Growth'], repos: ['member-portal', 'member-portal-api'], dataOwner: 'Priya N.', effectiveSince: 'Feb 12, 2026', lifecycle: 'Active' },
     history: [
       { date: 'Jul 27, 2026', actor: 'Jordan Kim', action: 'Risk confirmed', note: 'Talked to the team — a reviewer left the club mid-cycle. Backfill in progress.' },
       { date: 'Jul 20, 2026', actor: 'Jordan Kim', action: 'Helpful warning', note: 'Caught the review bottleneck a week before it would have blocked the release.' },
     ],
     evidence: [
-      { type: 'red', icon: 'pull', title: 'Pull requests are aging', current: '4 open PRs', baseline: '1 open PR', window: 'Trailing 14 days', threshold: '> 3 PRs open past 14 days', body: '4 open PRs have been open for more than 14 days, compared with a baseline of 1.' },
-      { type: 'amber', icon: 'activity', title: 'Activity is below its baseline', current: '6 active days', baseline: '12 active days', window: 'Trailing 3 weeks', threshold: '< 50% of baseline active days', body: '6 active days in the last 3 weeks versus a project baseline of 12.' },
-      { type: 'blue', icon: 'users', title: 'Project has a concentrated contributor pattern', current: '2 contributors', baseline: '5 contributors', window: 'Trailing 7 days', threshold: '< 3 active contributors', body: '2 active contributors this week. This is a dependency signal, not a performance measure.' },
+      { type: 'red', icon: 'pull', title: 'Pull requests aging', metric: 'openPRs', unit: '' },
+      { type: 'amber', icon: 'activity', title: 'Activity below baseline', metric: 'activity', unit: 'd' },
+      { type: 'blue', icon: 'users', title: 'Concentrated contributors', metric: 'contributors', unit: '' },
     ],
   },
   {
     id: 'campus-events', name: 'Campus Events', short: 'CE', team: 'Community Programs', repo: 'campus-events', status: 'Watch', statusClass: 'watch', signal: 'Review latency is rising', signalDetail: '6.2 days · +2.1 vs baseline', lastActivity: 'Today', trend: 'flat',
     weeks: [0.55, 0.6, 0.5, 0.65, 0.5, 0.45, 0.4, 0.35], flagFrom: 6,
+    seriesBaselines: { openPRs: [2, 3], reviewLatency: [4.1, 6.2], contributors: [4, 4] },
     description: 'Event discovery, registration, and volunteer coordination.',
-    metrics: { activeDays: '11 of 14', openPRs: '3', oldestPR: '6 days', reviewLatency: '6.2 days', contributors: '4', mergedThisWeek: '3' },
     boundary: { rootTeam: 'Community Programs', subteams: ['Events Ops'], repos: ['campus-events'], dataOwner: 'Marcus T.', effectiveSince: 'Nov 3, 2025', lifecycle: 'Active' },
     history: [
       { date: 'Jul 20, 2026', actor: 'Jordan Kim', action: 'Expected project cycle', note: 'Reviewer bandwidth dips every semester kickoff — consistent with last fall.' },
     ],
     evidence: [
-      { type: 'amber', icon: 'pull', title: 'Reviews are taking longer', current: '6.2 days', baseline: '4.1 days', window: 'Trailing 14 days', threshold: '> 1.5x baseline latency', body: 'Median time to first review is 6.2 days, up from a 4.1 day project baseline.' },
-      { type: 'blue', icon: 'activity', title: 'Activity remains consistent', current: '11 active days', baseline: '10 active days', window: 'Trailing 14 days', threshold: 'n/a — informational', body: 'The project has been active on 11 of the last 14 days.' },
+      { type: 'amber', icon: 'pull', title: 'Review latency rising', metric: 'reviewLatency', unit: 'd' },
+      { type: 'blue', icon: 'activity', title: 'Activity steady', metric: 'activity', unit: 'd' },
     ],
   },
   {
     id: 'design-system', name: 'Design System', short: 'DS', team: 'Platform Experience', repo: 'design-system', status: 'Watch', statusClass: 'watch', signal: 'Contributor count dipped', signalDetail: '3 → 1 active contributors', lastActivity: '2 days ago', trend: 'down',
     weeks: [0.65, 0.7, 0.68, 0.55, 0.5, 0.4, 0.3, 0.2], flagFrom: 5,
+    seriesBaselines: { openPRs: [1, 1], reviewLatency: [1.8, 1.8], contributors: [3, 1] },
     description: 'Shared interface foundations for App Dev products.',
-    metrics: { activeDays: '8 of 21', openPRs: '1', oldestPR: '4 days', reviewLatency: '1.8 days', contributors: '1', mergedThisWeek: '2' },
     boundary: { rootTeam: 'Platform Experience', subteams: ['Design Systems Guild'], repos: ['design-system', 'design-tokens'], dataOwner: 'Alex R.', effectiveSince: 'Jan 8, 2026', lifecycle: 'Active' },
     history: [
       { date: 'Jul 13, 2026', actor: 'Jordan Kim', action: 'Not useful', note: 'Contributor dip was a single maintainer on vacation, not a resourcing gap.' },
     ],
     evidence: [
-      { type: 'amber', icon: 'users', title: 'Active contributor count changed', current: '1 contributor', baseline: '3 contributors', window: 'Trailing 8 weeks', threshold: '< 2 active contributors', body: '1 active contributor this week versus a 3-person baseline over the past 8 weeks.' },
-      { type: 'blue', icon: 'pull', title: 'Pull request flow is healthy', current: '2 merged, 1 open', baseline: '2 merged, 1 open', window: 'Trailing 7 days', threshold: 'n/a — informational', body: '2 PRs were merged this week and the oldest open PR is 4 days old.' },
+      { type: 'amber', icon: 'users', title: 'Contributor count dipped', metric: 'contributors', unit: '' },
+      { type: 'blue', icon: 'pull', title: 'PR flow healthy', metric: 'openPRs', unit: '' },
     ],
   },
   {
     id: 'alumni-network', name: 'Alumni Network', short: 'AN', team: 'Community Programs', repo: 'alumni-network', status: 'Clear', statusClass: 'clear', signal: 'No current concern detected', signalDetail: '12 active days · steady flow', lastActivity: 'Today', trend: 'up', weeks: [0.5, 0.55, 0.6, 0.58, 0.65, 0.7, 0.72, 0.75], flagFrom: 99,
+    seriesBaselines: { openPRs: [1, 2], reviewLatency: [1.5, 1.2], contributors: [4, 5] },
     description: 'A lightweight connection hub for alumni and mentors.',
-    metrics: { activeDays: '12 of 14', openPRs: '2', oldestPR: '3 days', reviewLatency: '1.2 days', contributors: '5', mergedThisWeek: '4' },
     boundary: { rootTeam: 'Community Programs', subteams: ['Alumni Relations'], repos: ['alumni-network'], dataOwner: 'Marcus T.', effectiveSince: 'Sep 1, 2025', lifecycle: 'Active' },
     history: [{ date: 'Jul 13, 2026', actor: 'Jordan Kim', action: 'Risk resolved', note: 'Contributor rotation from last month fully backfilled.' }],
     evidence: [],
   },
   {
     id: 'onboarding', name: 'Onboarding Refresh', short: 'OR', team: 'People Operations', repo: 'onboarding-refresh', status: 'Clear', statusClass: 'clear', signal: 'No current concern detected', signalDetail: '9 active days · 3 PRs merged', lastActivity: 'Today', trend: 'up', weeks: [0.4, 0.45, 0.5, 0.55, 0.6, 0.62, 0.68, 0.7], flagFrom: 99,
+    seriesBaselines: { openPRs: [1, 1], reviewLatency: [1.1, 0.9], contributors: [2, 3] },
     description: 'The first-week experience for new App Dev members.',
-    metrics: { activeDays: '9 of 14', openPRs: '1', oldestPR: '2 days', reviewLatency: '0.9 days', contributors: '3', mergedThisWeek: '3' },
     boundary: { rootTeam: 'People Operations', subteams: ['Member Experience'], repos: ['onboarding-refresh'], dataOwner: 'Priya N.', effectiveSince: 'Mar 4, 2026', lifecycle: 'Active' },
     history: [],
     evidence: [],
   },
   {
     id: 'mobile-lab', name: 'Mobile Lab', short: 'ML', team: 'Innovation Studio', repo: 'mobile-lab', status: 'Insufficient data', statusClass: 'data', signal: 'Repository mapping incomplete', signalDetail: 'Ownership review required', lastActivity: '11 days ago', trend: 'flat', weeks: [0.3, 0.2, null, null, 0.25, null, null, 0.1], flagFrom: 99,
+    seriesBaselines: { openPRs: [null, null], reviewLatency: [null, null], contributors: [null, null] },
     description: 'Experimental mobile prototypes and technical spikes.',
-    metrics: { activeDays: '—', openPRs: '—', oldestPR: '—', reviewLatency: '—', contributors: '—', mergedThisWeek: '—' },
     boundary: { rootTeam: 'Innovation Studio', subteams: ['Mobile Spikes'], repos: ['mobile-lab', 'mobile-lab-experiments (unmapped)'], dataOwner: 'Unassigned', effectiveSince: '—', lifecycle: 'New' },
     history: [{ date: 'Jul 6, 2026', actor: 'System', action: 'Data quality problem', note: 'mobile-lab-experiments repository has no confirmed owning project.' }],
-    evidence: [{ type: 'blue', icon: 'lock', title: 'Project boundary needs attention', current: '1 unmapped repo', baseline: '0 unmapped repos', window: 'Since discovery', threshold: 'Any unmapped repository', body: 'A repository was discovered without a confirmed project owner. Signals are paused until it is mapped.' }],
+    evidence: [{ type: 'blue', icon: 'lock', title: 'Boundary needs mapping', metric: null, current: '1 unmapped repo', baseline: '0 unmapped repos' }],
   },
   {
     id: 'winter-campaign', name: 'Winter Campaign', short: 'WC', team: 'Marketing', repo: 'winter-campaign', status: 'Planned pause', statusClass: 'pause', signal: 'Inactivity is expected', signalDetail: 'Pause recorded through Aug 20', lastActivity: '16 days ago', trend: 'flat', weeks: [0.5, 0.4, 0.2, 0.05, 0.05, 0.05, 0.05, 0.05], flagFrom: 99,
+    seriesBaselines: { openPRs: [1, 0], reviewLatency: [null, null], contributors: [2, 1] },
     description: 'Seasonal campaign planning and creative coordination.',
-    metrics: { activeDays: '1 of 21', openPRs: '0', oldestPR: '—', reviewLatency: '—', contributors: '1', mergedThisWeek: '0' },
     boundary: { rootTeam: 'Marketing', subteams: [], repos: ['winter-campaign'], dataOwner: 'Sam D.', effectiveSince: 'Oct 2, 2025', lifecycle: 'Paused' },
     history: [{ date: 'Jul 6, 2026', actor: 'Sam D.', action: 'Planned pause', note: 'Campaign work resumes after the August 20 seasonal kickoff.' }],
-    evidence: [{ type: 'blue', icon: 'calendar', title: 'Planned pause is recorded', current: '16 days inactive', baseline: 'Excluded from risk scoring', window: 'Through Aug 20, 2026', threshold: 'n/a — pause recorded', body: 'The project is intentionally paused through August 20 and is excluded from risk signals.' }],
+    evidence: [{ type: 'blue', icon: 'calendar', title: 'Planned pause recorded', metric: null, current: 'Through Aug 20', baseline: 'Excluded from scoring' }],
   },
 ];
 
-const viewLabels = { overview: 'Overview', projects: 'Projects', 'review-log': 'Review log', boundaries: 'Project boundaries', rules: 'Signal rules' };
+const weekDates = ['Jun 15', 'Jun 22', 'Jun 29', 'Jul 06', 'Jul 13', 'Jul 20', 'Jul 27', 'Aug 03'];
+
+function lerp8(baseline, current) {
+  if (baseline === null || current === null) return [null, null, null, null, null, null, null, null];
+  return Array.from({ length: 8 }, (_, i) => {
+    if (i === 0) return baseline;
+    if (i === 7) return current;
+    const t = i / 7;
+    const taper = Math.sin(t * Math.PI);
+    const wobble = Math.sin(i * 1.9) * Math.abs(current - baseline) * 0.06 * taper;
+    return Math.max(0, Math.round((baseline + (current - baseline) * t + wobble) * 10) / 10);
+  });
+}
+
+projects.forEach((project) => {
+  const b = project.seriesBaselines;
+  project.series = {
+    activity: project.weeks.map((w) => (w === null ? null : Math.round(w * 7))),
+    openPRs: lerp8(...b.openPRs),
+    reviewLatency: lerp8(...b.reviewLatency),
+    contributors: lerp8(...b.contributors),
+  };
+});
+
+function statusColor(statusClass) {
+  return { risk: 'var(--clay)', watch: 'var(--amber)', clear: 'var(--moss)', data: 'var(--plum)', pause: 'var(--slate)' }[statusClass];
+}
+
+function lastValue(series) {
+  for (let i = series.length - 1; i >= 0; i -= 1) if (series[i] !== null) return series[i];
+  return null;
+}
+
+function sparkChart(points, { color = 'var(--ink)', baseline = null, width = 220, height = 56, suffix = '', area = true } = {}) {
+  const vals = points.filter((v) => v !== null);
+  if (!vals.length) return `<div class="chart-empty" style="width:${width}px;height:${height}px">No data</div>`;
+  const allVals = baseline !== null ? vals.concat([baseline]) : vals;
+  const min = Math.min(...allVals);
+  const max = Math.max(...allVals);
+  const span = max - min || Math.max(1, max * 0.2);
+  const pad = span * 0.2;
+  const domainMin = min - pad;
+  const domainMax = max + pad;
+  const stepX = width / (points.length - 1);
+  const y = (v) => height - 6 - ((v - domainMin) / (domainMax - domainMin)) * (height - 12);
+  const segments = [];
+  let current = [];
+  points.forEach((v, i) => {
+    if (v === null) { if (current.length) segments.push(current); current = []; }
+    else current.push([i * stepX, y(v)]);
+  });
+  if (current.length) segments.push(current);
+  const fmt = (seg) => seg.map(([x, yy]) => `${x.toFixed(1)} ${yy.toFixed(1)}`).join(' L ');
+  const pathD = segments.map((seg) => `M${fmt(seg)}`).join(' ');
+  const areaD = segments.map((seg) => `M${fmt(seg)} L${seg[seg.length - 1][0].toFixed(1)} ${height} L${seg[0][0].toFixed(1)} ${height} Z`).join(' ');
+  const last = segments.length ? segments[segments.length - 1].at(-1) : null;
+  const dots = points.map((v, i) => (v === null ? '' : `<circle class="chart-hit" cx="${(i * stepX).toFixed(1)}" cy="${y(v).toFixed(1)}" r="7" fill="transparent"><title>${weekDates[i]}: ${v}${suffix}</title></circle>`)).join('');
+  const baselineLine = baseline !== null ? `<line class="chart-baseline" x1="0" y1="${y(baseline).toFixed(1)}" x2="${width}" y2="${y(baseline).toFixed(1)}"/>` : '';
+  return `<svg class="spark-chart" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="none" role="img" aria-label="8-week trend">${baselineLine}${area ? `<path class="spark-area" d="${areaD}" fill="${color}" opacity="0.12"/>` : ''}<path class="spark-line" d="${pathD}" stroke="${color}" fill="none"/>${last ? `<circle class="spark-end" cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/>` : ''}${dots}</svg>`;
+}
+
+function chartCaption(label, current, baseline, unit = '') {
+  if (current === null) return `<div class="chart-caption"><span class="chart-caption-label">${label}</span><span class="chart-caption-value">—</span></div>`;
+  const delta = baseline !== null ? current - baseline : null;
+  const arrow = delta === null || Math.abs(delta) < 0.05 ? '' : delta > 0 ? '▲' : '▼';
+  return `<div class="chart-caption"><span class="chart-caption-label">${label}</span><span class="chart-caption-value">${current}${unit}${baseline !== null ? ` <em>${arrow} vs ${baseline}${unit} baseline</em>` : ''}</span></div>`;
+}
+
+const viewLabels = { overview: 'Overview', projects: 'Projects', insights: 'Insights', 'review-log': 'Review log', boundaries: 'Project boundaries', rules: 'Signal rules' };
 let currentView = 'overview';
 let selectedProject = projects[0];
 let currentFilter = 'All projects';
@@ -167,7 +235,7 @@ function renderOverview() {
           <div class="queue-item">
             ${monogram(project)}
             ${signalStrip(project)}
-            <div class="queue-main"><div class="queue-name-line"><span class="queue-name">${project.name}</span>${statusPill(project)}</div><div class="queue-meta">${project.team} · ${project.description}</div></div>
+            <div class="queue-main"><div class="queue-name-line"><span class="queue-name">${project.name}</span>${statusPill(project)}</div><div class="queue-meta">${project.team} · ${project.repo}</div></div>
             <div class="queue-signal"><strong>${project.signal}</strong><span class="mono">${project.signalDetail}</span></div>
             <button class="queue-action view-project" data-project-id="${project.id}">View project</button>
           </div>`).join('')}</div>
@@ -188,30 +256,71 @@ function renderProjects() {
     <div class="detail-shell"><div class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${projects.length} projects shown · evidence snapshots from Aug 03, 2026</p></div><div class="filter-row">${['All projects', 'At risk', 'Watch', 'Clear'].map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${filter}">${filter}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Trace</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.map((project) => `<tr class="${selectedProject.id === project.id ? 'selected' : ''}" data-project-id="${project.id}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${project.name}</strong><span>${project.team} · ${project.repo}</span></div></div></td><td>${statusPill(project)}</td><td>${signalStrip(project)}</td><td>${project.signal}</td><td><span class="freshness">${project.lastActivity}</span></td><td><span class="freshness">${project.status === 'Insufficient data' ? 'Needs mapping' : 'Complete · 97%'}</span></td></tr>`).join('')}</tbody></table></div><div class="table-footer"><span>Boundaries are versioned and reviewed by project owners.</span><button class="panel-link" id="boundary-link">Manage boundaries →</button></div></div>${renderDetail(selectedProject)}</div>`;
 }
 
+function renderInsights() {
+  return `
+    <div class="page-heading"><div><span class="eyebrow">Combined view · last 8 weeks</span><h1>Insights</h1><p>Every project's activity, review flow, and contributor trend, side by side.</p></div></div>
+    <section class="panel">
+      <div class="table-scroll">
+      <table class="insights-table">
+        <thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th><th>Contributors</th></tr></thead>
+        <tbody>${projects.map((project) => {
+          const color = statusColor(project.statusClass);
+          return `<tr class="insights-row" data-project-id="${project.id}">
+            <td><div class="table-project">${monogram(project, 'sm')}<div><strong>${project.name}</strong><span>${project.team}</span></div></div>${statusPill(project)}</td>
+            <td>${sparkChart(project.series.activity, { color, width: 150, height: 40, area: false })}</td>
+            <td>${sparkChart(project.series.openPRs, { color, baseline: project.seriesBaselines.openPRs[0], width: 150, height: 40, area: false })}</td>
+            <td>${sparkChart(project.series.reviewLatency, { color, baseline: project.seriesBaselines.reviewLatency[0], width: 150, height: 40, area: false, suffix: 'd' })}</td>
+            <td>${sparkChart(project.series.contributors, { color, baseline: project.seriesBaselines.contributors[0], width: 150, height: 40, area: false })}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+      </div>
+    </section>`;
+}
+
 const statusMeta = {
-  risk: { copy: 'Multiple independent signals deserve a conversation with this team.', cta: 'Review warning' },
-  watch: { copy: 'An emerging signal deserves a closer look before it becomes a delivery issue.', cta: 'Review warning' },
-  clear: { copy: 'No current concern detected from the available project-level signals.', cta: 'Confirm reviewed' },
-  data: { copy: 'The system cannot assess this project reliably until its repository ownership is confirmed.', cta: 'Flag for mapping' },
-  pause: { copy: 'Inactivity is expected and excluded from risk signals while this pause is recorded.', cta: 'Acknowledge pause' },
+  risk: { copy: 'Needs a conversation with the team.', cta: 'Review warning' },
+  watch: { copy: 'Emerging signal, worth a look.', cta: 'Review warning' },
+  clear: { copy: 'No concern in current signals.', cta: 'Confirm reviewed' },
+  data: { copy: 'Boundary needs mapping.', cta: 'Flag for mapping' },
+  pause: { copy: 'Pause recorded, excluded from risk.', cta: 'Acknowledge pause' },
 };
+
+function evidenceRow(project, item, size = '') {
+  if (item.metric) {
+    const series = project.series[item.metric];
+    const baseline = project.seriesBaselines[item.metric] ? project.seriesBaselines[item.metric][0] : null;
+    const current = lastValue(series);
+    return `<div class="evidence-item ${size}"><span class="evidence-marker ${item.type}">${icon(item.icon)}</span><div class="evidence-copy"><div class="evidence-top"><strong>${item.title}</strong>${chartCaption('', current, baseline, item.unit)}</div>${sparkChart(series, { color: statusColor(project.statusClass), baseline, width: size === 'lg' ? 420 : 220, height: size === 'lg' ? 56 : 36, suffix: item.unit, area: size === 'lg' })}</div></div>`;
+  }
+  return `<div class="evidence-item ${size}"><span class="evidence-marker ${item.type}">${icon(item.icon)}</span><div class="evidence-copy"><div class="evidence-top"><strong>${item.title}</strong><span class="chart-caption-value">${item.current}</span></div><span class="evidence-note">${item.baseline}</span></div></div>`;
+}
+
+function evidenceList(project, size = '') {
+  if (!project.evidence.length) return `<div class="evidence-item"><span class="evidence-marker teal">${icon('check-circle')}</span><div class="evidence-copy"><strong>No current concern</strong></div></div>`;
+  return project.evidence.map((item) => evidenceRow(project, item, size)).join('');
+}
 
 function renderDetail(project) {
   const meta = statusMeta[project.statusClass];
-  const evidence = project.evidence.length ? project.evidence.map((item) => `<div class="evidence-item"><span class="evidence-marker ${item.type}">${icon(item.icon)}</span><div class="evidence-copy"><strong>${item.title}</strong><p>${item.body}</p></div></div>`).join('') : `<div class="evidence-item"><span class="evidence-marker teal">${icon('check-circle')}</span><div class="evidence-copy"><strong>No current concern detected</strong><p>The available signals are within this project’s normal range. Continue the regular review cadence.</p></div></div>`;
-  return `<section class="panel detail-panel"><div class="detail-top"><div class="detail-project">${monogram(project)}<div><h2>${project.name}</h2><p>${project.team} · ${project.repo}</p></div>${signalStrip(project)}</div><div class="detail-top-actions"><button class="panel-link" id="open-profile">Full report →</button><button class="detail-close" id="close-detail" aria-label="Close project detail">×</button></div></div><div class="detail-status ${project.statusClass}"><strong>${project.status}</strong><span>${meta.copy}</span></div><div class="evidence-section"><div class="evidence-heading"><span>Evidence</span><span>Snapshot · Aug 03</span></div>${evidence}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${meta.cta} <span>→</span></button></div></section>`;
+  return `<section class="panel detail-panel"><div class="detail-top"><div class="detail-project">${monogram(project)}<div><h2>${project.name}</h2><p>${project.team} · ${project.repo}</p></div>${signalStrip(project)}</div><div class="detail-top-actions"><button class="panel-link" id="open-profile">Full report →</button><button class="detail-close" id="close-detail" aria-label="Close project detail">×</button></div></div><div class="detail-status ${project.statusClass}"><strong>${project.status}</strong><span>${meta.copy}</span></div><div class="evidence-section"><div class="evidence-heading"><span>Evidence</span><span>Snapshot · Aug 03</span></div>${evidenceList(project)}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${meta.cta} <span>→</span></button></div></section>`;
 }
 
-function metricRow(project) {
-  const m = project.metrics;
-  if (!m) return '';
-  const tiles = [['Active days', m.activeDays], ['Open PRs', m.openPRs], ['Oldest open PR', m.oldestPR], ['Review latency', m.reviewLatency], ['Active contributors', m.contributors], ['Merged this week', m.mergedThisWeek]];
-  return `<div class="metric-row">${tiles.map(([label, value]) => `<div class="metric-tile"><span class="metric-label">${label}</span><span class="metric-value">${value}</span></div>`).join('')}</div>`;
-}
+const chartMetrics = [
+  ['Activity', 'activity', ''],
+  ['Open PRs', 'openPRs', ''],
+  ['Review latency', 'reviewLatency', 'd'],
+  ['Contributors', 'contributors', ''],
+];
 
-function evidenceDetailed(project) {
-  if (!project.evidence.length) return `<div class="evidence-item"><span class="evidence-marker teal">${icon('check-circle')}</span><div class="evidence-copy"><strong>No current concern detected</strong><p>The available signals are within this project’s normal range. Continue the regular review cadence.</p></div></div>`;
-  return project.evidence.map((item) => `<div class="evidence-item detailed"><span class="evidence-marker ${item.type}">${icon(item.icon)}</span><div class="evidence-copy"><strong>${item.title}</strong><p>${item.body}</p><div class="evidence-stats"><span><em>Current</em>${item.current}</span><span><em>Baseline</em>${item.baseline}</span><span><em>Window</em>${item.window}</span><span><em>Trigger</em>${item.threshold}</span></div></div></div>`).join('');
+function metricCharts(project, size = '') {
+  const color = statusColor(project.statusClass);
+  return `<div class="metric-charts">${chartMetrics.map(([label, key, unit]) => {
+    const series = project.series[key];
+    const baseline = key === 'activity' ? null : project.seriesBaselines[key][0];
+    const current = lastValue(series);
+    return `<div class="metric-chart-tile">${chartCaption(label, current, baseline, unit)}${sparkChart(series, { color, baseline, width: size === 'sm' ? 130 : 260, height: size === 'sm' ? 40 : 64 })}</div>`;
+  }).join('')}</div>`;
 }
 
 function boundaryCard(project) {
@@ -236,11 +345,11 @@ function renderProjectProfile(project) {
       <div class="heading-actions">${signalStrip(project, 'lg')}</div>
     </div>
     <div class="detail-status wide ${project.statusClass}"><strong>${project.status}</strong><span>${meta.copy}</span></div>
-    ${metricRow(project)}
+    ${metricCharts(project)}
     <div class="profile-grid">
       <section class="panel">
-        <div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">What is driving this status, compared against this project's own baseline</p></div><span class="eyebrow">Snapshot · Aug 03</span></div>
-        <div class="evidence-section wide">${evidenceDetailed(project)}</div>
+        <div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Signal vs. this project's own baseline</p></div><span class="eyebrow">Snapshot · Aug 03</span></div>
+        <div class="evidence-section wide">${evidenceList(project, 'lg')}</div>
         <div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${meta.cta} <span>→</span></button></div>
       </section>
       <div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div>
@@ -264,6 +373,7 @@ function render() {
   const appView = document.getElementById('app-view');
   if (currentView === 'overview') appView.innerHTML = renderOverview();
   if (currentView === 'projects') appView.innerHTML = renderProjects();
+  if (currentView === 'insights') appView.innerHTML = renderInsights();
   if (currentView === 'profile') appView.innerHTML = renderProjectProfile(selectedProject);
   if (currentView === 'review-log' || currentView === 'boundaries' || currentView === 'rules') appView.innerHTML = renderUtilityView(currentView);
   document.getElementById('breadcrumb-current').textContent = currentView === 'profile' ? selectedProject.name : viewLabels[currentView];
@@ -298,7 +408,12 @@ function bindViewEvents() {
     currentView = 'profile';
     render();
   }));
-  document.querySelectorAll('[data-project-id]:not(.view-project)').forEach((row) => row.addEventListener('click', () => { selectedProject = projects.find((project) => project.id === row.dataset.projectId) || selectedProject; render(); }));
+  document.querySelectorAll('[data-project-id]:not(.view-project):not(.insights-row)').forEach((row) => row.addEventListener('click', () => { selectedProject = projects.find((project) => project.id === row.dataset.projectId) || selectedProject; render(); }));
+  document.querySelectorAll('.insights-row').forEach((row) => row.addEventListener('click', () => {
+    selectedProject = projects.find((project) => project.id === row.dataset.projectId) || selectedProject;
+    currentView = 'profile';
+    render();
+  }));
   document.getElementById('profile-back')?.addEventListener('click', () => { currentView = 'projects'; render(); });
   document.getElementById('open-profile')?.addEventListener('click', () => { currentView = 'profile'; render(); });
   document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', () => { currentFilter = button.dataset.filter; render(); }));
