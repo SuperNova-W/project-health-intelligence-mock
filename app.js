@@ -36,6 +36,12 @@ const projects = [
     seriesBaselines: { openPRs: [1, 4], reviewLatency: [2.1, 5.4], contributors: [5, 2] },
     description: 'Self-service member onboarding and account management.',
     boundary: { rootTeam: 'Product Experience', subteams: ['Member Portal Core', 'Growth'], repos: ['member-portal', 'member-portal-api'], dataOwner: 'Priya N.', effectiveSince: 'Feb 12, 2026', lifecycle: 'Active' },
+    contributors: [
+      { name: 'Priya N.', commits: 22, additions: 1840, deletions: 410 },
+      { name: 'Theo B.', commits: 9, additions: 520, deletions: 180 },
+      { name: 'Jordan Kim', commits: 4, additions: 160, deletions: 40 },
+      { name: 'Alex R.', commits: 2, additions: 65, deletions: 20 },
+    ],
     history: [
       { date: 'Jul 27, 2026', actor: 'Jordan Kim', action: 'Risk confirmed', note: 'Talked to the team — a reviewer left the club mid-cycle. Backfill in progress.' },
       { date: 'Jul 20, 2026', actor: 'Jordan Kim', action: 'Helpful warning', note: 'Caught the review bottleneck a week before it would have blocked the release.' },
@@ -52,6 +58,12 @@ const projects = [
     seriesBaselines: { openPRs: [2, 3], reviewLatency: [4.1, 6.2], contributors: [4, 4] },
     description: 'Event discovery, registration, and volunteer coordination.',
     boundary: { rootTeam: 'Community Programs', subteams: ['Events Ops'], repos: ['campus-events'], dataOwner: 'Marcus T.', effectiveSince: 'Nov 3, 2025', lifecycle: 'Active' },
+    contributors: [
+      { name: 'Marcus T.', commits: 14, additions: 980, deletions: 310 },
+      { name: 'Sam D.', commits: 12, additions: 860, deletions: 275 },
+      { name: 'Riya S.', commits: 11, additions: 790, deletions: 240 },
+      { name: 'Devon K.', commits: 9, additions: 610, deletions: 190 },
+    ],
     history: [
       { date: 'Jul 20, 2026', actor: 'Jordan Kim', action: 'Expected project cycle', note: 'Reviewer bandwidth dips every semester kickoff — consistent with last fall.' },
     ],
@@ -66,6 +78,11 @@ const projects = [
     seriesBaselines: { openPRs: [1, 1], reviewLatency: [1.8, 1.8], contributors: [3, 1] },
     description: 'Shared interface foundations for App Dev products.',
     boundary: { rootTeam: 'Platform Experience', subteams: ['Design Systems Guild'], repos: ['design-system', 'design-tokens'], dataOwner: 'Alex R.', effectiveSince: 'Jan 8, 2026', lifecycle: 'Active' },
+    contributors: [
+      { name: 'Alex R.', commits: 26, additions: 2100, deletions: 640 },
+      { name: 'Priya N.', commits: 3, additions: 140, deletions: 35 },
+      { name: 'Theo B.', commits: 2, additions: 90, deletions: 15 },
+    ],
     history: [
       { date: 'Jul 13, 2026', actor: 'Jordan Kim', action: 'Not useful', note: 'Contributor dip was a single maintainer on vacation, not a resourcing gap.' },
     ],
@@ -79,6 +96,13 @@ const projects = [
     seriesBaselines: { openPRs: [1, 2], reviewLatency: [1.5, 1.2], contributors: [4, 5] },
     description: 'A lightweight connection hub for alumni and mentors.',
     boundary: { rootTeam: 'Community Programs', subteams: ['Alumni Relations'], repos: ['alumni-network'], dataOwner: 'Marcus T.', effectiveSince: 'Sep 1, 2025', lifecycle: 'Active' },
+    contributors: [
+      { name: 'Marcus T.', commits: 10, additions: 640, deletions: 180 },
+      { name: 'Ana G.', commits: 9, additions: 590, deletions: 160 },
+      { name: 'Jamie L.', commits: 8, additions: 510, deletions: 140 },
+      { name: 'Riya S.', commits: 7, additions: 450, deletions: 120 },
+      { name: 'Devon K.', commits: 6, additions: 380, deletions: 95 },
+    ],
     history: [{ date: 'Jul 13, 2026', actor: 'Jordan Kim', action: 'Risk resolved', note: 'Contributor rotation from last month fully backfilled.' }],
     evidence: [],
   },
@@ -87,6 +111,11 @@ const projects = [
     seriesBaselines: { openPRs: [1, 1], reviewLatency: [1.1, 0.9], contributors: [2, 3] },
     description: 'The first-week experience for new App Dev members.',
     boundary: { rootTeam: 'People Operations', subteams: ['Member Experience'], repos: ['onboarding-refresh'], dataOwner: 'Priya N.', effectiveSince: 'Mar 4, 2026', lifecycle: 'Active' },
+    contributors: [
+      { name: 'Priya N.', commits: 13, additions: 720, deletions: 190 },
+      { name: 'Jamie L.', commits: 10, additions: 560, deletions: 150 },
+      { name: 'Ana G.', commits: 7, additions: 410, deletions: 100 },
+    ],
     history: [],
     evidence: [],
   },
@@ -95,6 +124,7 @@ const projects = [
     seriesBaselines: { openPRs: [null, null], reviewLatency: [null, null], contributors: [null, null] },
     description: 'Experimental mobile prototypes and technical spikes.',
     boundary: { rootTeam: 'Innovation Studio', subteams: ['Mobile Spikes'], repos: ['mobile-lab', 'mobile-lab-experiments (unmapped)'], dataOwner: 'Unassigned', effectiveSince: '—', lifecycle: 'New' },
+    contributors: [],
     history: [{ date: 'Jul 6, 2026', actor: 'System', action: 'Data quality problem', note: 'mobile-lab-experiments repository has no confirmed owning project.' }],
     evidence: [{ type: 'blue', icon: 'lock', title: 'Boundary needs mapping', metric: null, current: '1 unmapped repo', baseline: '0 unmapped repos' }],
   },
@@ -103,12 +133,26 @@ const projects = [
     seriesBaselines: { openPRs: [1, 0], reviewLatency: [null, null], contributors: [2, 1] },
     description: 'Seasonal campaign planning and creative coordination.',
     boundary: { rootTeam: 'Marketing', subteams: [], repos: ['winter-campaign'], dataOwner: 'Sam D.', effectiveSince: 'Oct 2, 2025', lifecycle: 'Paused' },
+    contributors: [{ name: 'Sam D.', commits: 3, additions: 140, deletions: 30 }],
     history: [{ date: 'Jul 6, 2026', actor: 'Sam D.', action: 'Planned pause', note: 'Campaign work resumes after the August 20 seasonal kickoff.' }],
     evidence: [{ type: 'blue', icon: 'calendar', title: 'Planned pause recorded', metric: null, current: 'Through Aug 20', baseline: 'Excluded from scoring' }],
   },
 ];
 
 const weekDates = ['Jun 15', 'Jun 22', 'Jun 29', 'Jul 06', 'Jul 13', 'Jul 20', 'Jul 27', 'Aug 03'];
+
+const CONTRIB_WEEKS = 26;
+const CONTRIB_DAYS = CONTRIB_WEEKS * 7;
+const contribEnd = new Date(2026, 7, 3);
+const contribStart = new Date(contribEnd);
+contribStart.setDate(contribStart.getDate() - (CONTRIB_DAYS - 1));
+const dailyDates = Array.from({ length: CONTRIB_DAYS }, (_, i) => {
+  const d = new Date(contribStart);
+  d.setDate(d.getDate() + i);
+  return d;
+});
+const dailyRowLabels = Array.from({ length: 7 }, (_, r) => ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dailyDates[r].getDay()]);
+const dailyIsWeekend = dailyRowLabels.map((label) => label === 'Sun' || label === 'Sat');
 
 function lerp8(baseline, current) {
   if (baseline === null || current === null) return [null, null, null, null, null, null, null, null];
@@ -122,6 +166,13 @@ function lerp8(baseline, current) {
   });
 }
 
+function seededRandom(seedStr) {
+  let h = 0;
+  for (let i = 0; i < seedStr.length; i += 1) h = (h * 31 + seedStr.charCodeAt(i)) | 0;
+  let s = Math.abs(h) || 1;
+  return () => { s = (s * 16807) % 2147483647; return (s % 1000) / 1000; };
+}
+
 projects.forEach((project) => {
   const b = project.seriesBaselines;
   project.series = {
@@ -130,6 +181,49 @@ projects.forEach((project) => {
     reviewLatency: lerp8(...b.reviewLatency),
     contributors: lerp8(...b.contributors),
   };
+
+  const rngCommits = seededRandom(`${project.id}-commits`);
+  project.commits = project.weeks.map((w) => (w === null ? null : Math.round(w * 13 + rngCommits() * 5)));
+
+  const rngCode = seededRandom(`${project.id}-code`);
+  project.codeFrequency = {
+    additions: project.commits.map((c) => (c === null ? null : Math.round(c * (10 + rngCode() * 18)))),
+    deletions: project.commits.map((c) => (c === null ? null : Math.round(c * (4 + rngCode() * 9)))),
+  };
+
+  const rngPunch = seededRandom(`${project.id}-punch`);
+  const validWeeks = project.weeks.filter((w) => w !== null);
+  const activityLevel = validWeeks.length ? validWeeks.reduce((a, v) => a + v, 0) / validWeeks.length : 0;
+  project.punchCard = Array.from({ length: 7 }, (_, day) => {
+    const dayWeight = day === 0 || day === 6 ? 0.4 : 1;
+    return Array.from({ length: 24 }, (_, hour) => {
+      const hourCurve = Math.max(0, Math.sin(((hour - 8) / 16) * Math.PI));
+      const noise = 0.55 + rngPunch() * 0.9;
+      return Math.max(0, Math.min(1, activityLevel * dayWeight * hourCurve * noise));
+    });
+  });
+
+  const rngDaily = seededRandom(`${project.id}-daily`);
+  const knownWeekLevels = project.weeks.filter((w) => w !== null);
+  const avgLevel = knownWeekLevels.length ? knownWeekLevels.reduce((a, v) => a + v, 0) / knownWeekLevels.length : 0;
+  const priorWeeks = CONTRIB_WEEKS - 8;
+  let walkLevel = avgLevel;
+  const priorWeekLevels = Array.from({ length: priorWeeks }, () => {
+    walkLevel = Math.max(0.04, Math.min(0.95, walkLevel + (rngDaily() - 0.5) * 0.4));
+    return walkLevel;
+  });
+  project.dailyActivity = Array.from({ length: CONTRIB_DAYS }, (_, i) => {
+    const col = Math.floor(i / 7);
+    const row = i % 7;
+    const weekLevel = col >= priorWeeks ? project.weeks[col - priorWeeks] : priorWeekLevels[col];
+    if (weekLevel === null) return null;
+    if (weekLevel < 0.12 && rngDaily() < 0.55) return null;
+    const dayWeight = dailyIsWeekend[row] ? 0.4 : 1;
+    const noise = 0.35 + rngDaily() * 1.15;
+    const raw = weekLevel * dayWeight * noise;
+    if (raw < 0.06) return 0;
+    return Math.round(Math.min(1, raw) * 100) / 100;
+  });
 });
 
 function statusColor(statusClass) {
@@ -174,6 +268,167 @@ function chartCaption(label, current, baseline, unit = '') {
   const delta = baseline !== null ? current - baseline : null;
   const arrow = delta === null || Math.abs(delta) < 0.05 ? '' : delta > 0 ? '▲' : '▼';
   return `<div class="chart-caption"><span class="chart-caption-label">${label}</span><span class="chart-caption-value">${current}${unit}${baseline !== null ? ` <em>${arrow} vs ${baseline}${unit} baseline</em>` : ''}</span></div>`;
+}
+
+function barChart(points, { color = 'var(--ink)', width = 520, height = 110, suffix = '' } = {}) {
+  const vals = points.filter((v) => v !== null);
+  if (!vals.length) return `<div class="chart-empty" style="width:100%;height:${height}px">No data</div>`;
+  const max = Math.max(...vals, 1);
+  const stepX = width / points.length;
+  const barW = Math.max(4, stepX * 0.5);
+  const bars = points.map((v, i) => {
+    if (v === null) return '';
+    const h = Math.max(1, (v / max) * (height - 14));
+    const x = i * stepX + (stepX - barW) / 2;
+    const y = height - h;
+    return `<rect class="bar-mark" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="2" fill="${color}"><title>${weekDates[i]}: ${v}${suffix}</title></rect>`;
+  }).join('');
+  return `<svg class="bar-chart" viewBox="0 0 ${width} ${height}" width="100%" height="${height}" preserveAspectRatio="none" role="img" aria-label="Weekly commit activity">${bars}</svg>`;
+}
+
+function codeFrequencyChart(project, { width = 520, height = 140 } = {}) {
+  const { additions, deletions } = project.codeFrequency;
+  const vals = additions.concat(deletions).filter((v) => v !== null);
+  if (!vals.length) return `<div class="chart-empty" style="width:100%;height:${height}px">No data</div>`;
+  const max = Math.max(...vals, 1);
+  const mid = height / 2;
+  const stepX = width / additions.length;
+  const barW = Math.max(4, stepX * 0.46);
+  const bars = additions.map((a, i) => {
+    const d = deletions[i];
+    if (a === null) return '';
+    const hA = Math.max(1, (a / max) * (mid - 8));
+    const hD = Math.max(1, (d / max) * (mid - 8));
+    const x = i * stepX + (stepX - barW) / 2;
+    return `<rect class="bar-mark" x="${x.toFixed(1)}" y="${(mid - hA).toFixed(1)}" width="${barW.toFixed(1)}" height="${hA.toFixed(1)}" rx="2" fill="var(--moss)"><title>${weekDates[i]}: +${a} lines</title></rect><rect class="bar-mark" x="${x.toFixed(1)}" y="${mid.toFixed(1)}" width="${barW.toFixed(1)}" height="${hD.toFixed(1)}" rx="2" fill="var(--clay)"><title>${weekDates[i]}: −${d} lines</title></rect>`;
+  }).join('');
+  return `<svg class="bar-chart" viewBox="0 0 ${width} ${height}" width="100%" height="${height}" preserveAspectRatio="none" role="img" aria-label="Weekly lines added and removed"><line class="chart-zero" x1="0" y1="${mid}" x2="${width}" y2="${mid}"/>${bars}</svg>`;
+}
+
+const punchDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function punchCardChart(project, { cell = 15 } = {}) {
+  const grid = project.punchCard;
+  const maxV = Math.max(...grid.flat(), 0.05);
+  const width = 24 * cell + 34;
+  const height = 7 * cell + 16;
+  let dots = '';
+  grid.forEach((row, day) => {
+    row.forEach((v, hour) => {
+      const r = (v / maxV) * (cell * 0.42);
+      if (r < 0.6) return;
+      const cx = 34 + hour * cell + cell / 2;
+      const cy = 4 + day * cell + cell / 2;
+      dots += `<circle cx="${cx}" cy="${cy}" r="${r.toFixed(1)}" fill="var(--ink)" opacity="${(0.3 + v * 0.55).toFixed(2)}"><title>${punchDays[day]} ${hour}:00 — ${Math.round((v / maxV) * 100)}% of peak</title></circle>`;
+    });
+  });
+  const dayLabels = punchDays.map((d, i) => `<text x="26" y="${4 + i * cell + cell / 2 + 3}" class="punch-label" text-anchor="end">${d}</text>`).join('');
+  const hourLabels = [0, 6, 12, 18].map((h) => `<text x="${34 + h * cell + cell / 2}" y="${height + 11}" class="punch-label" text-anchor="middle">${h === 0 ? '12a' : h === 12 ? '12p' : h < 12 ? `${h}a` : `${h - 12}p`}</text>`).join('');
+  return `<svg class="punch-chart" viewBox="0 0 ${width} ${height + 14}" width="100%" height="${height + 14}" role="img" aria-label="Commit activity by day and hour">${dayLabels}${dots}${hourLabels}</svg>`;
+}
+
+function contributorsCard(project) {
+  const list = project.contributors || [];
+  if (!list.length) return `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Contributors</h2><p class="panel-subtitle">Trailing 8 weeks</p></div></div><div class="history-empty" style="padding:4px 20px 18px;">No contributor data available yet.</div></section>`;
+  const max = Math.max(...list.map((c) => c.commits));
+  const total = list.reduce((sum, c) => sum + c.commits, 0);
+  const color = statusColor(project.statusClass);
+  const rows = list.map((c) => `<div class="contributor-row"><div class="contributor-line"><span class="contributor-name">${c.name}</span><span class="contributor-commits">${c.commits} commits</span></div><div class="contributor-bar-track"><div class="contributor-bar" style="width:${Math.max(4, (c.commits / max) * 100)}%; background:${color}"></div></div><div class="contributor-lines"><span class="add">+${c.additions}</span><span class="del">−${c.deletions}</span><span class="share">${Math.round((c.commits / total) * 100)}% of commits</span></div></div>`).join('');
+  return `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Contributors</h2><p class="panel-subtitle">Trailing 8 weeks · ${total} commits total</p></div></div><div class="contributor-list">${rows}</div></section>`;
+}
+
+function codeInsightsSection(project) {
+  return `<section class="panel code-insights">
+    <div class="panel-header"><div><h2 class="panel-title">Code insights</h2><p class="panel-subtitle">Repository-level activity — commits, lines changed, and when work happens</p></div><span class="eyebrow">Aug 03</span></div>
+    <div class="code-charts-row">
+      <div class="code-chart-col"><span class="chart-caption-label">Commits per week</span>${barChart(project.commits, { color: statusColor(project.statusClass) })}</div>
+      <div class="code-chart-col"><span class="chart-caption-label">Lines added / removed</span>${codeFrequencyChart(project)}</div>
+    </div>
+    <div class="punch-wrap"><span class="chart-caption-label">When commits happen</span>${punchCardChart(project)}</div>
+  </section>`;
+}
+
+function contributionCalendar(project, { cell = 10, gap = 2 } = {}) {
+  const colW = cell + gap;
+  const rowH = cell + gap;
+  const leftPad = 26;
+  const topPad = 14;
+  const width = leftPad + CONTRIB_WEEKS * colW - gap;
+  const height = topPad + 7 * rowH - gap;
+  const color = statusColor(project.statusClass);
+  const flat = project.dailyActivity.filter((v) => v !== null);
+  const maxV = Math.max(...flat, 0.05);
+  let cells = '';
+  let months = '';
+  let lastMonth = null;
+  for (let col = 0; col < CONTRIB_WEEKS; col += 1) {
+    const firstDate = dailyDates[col * 7];
+    const m = firstDate.getMonth();
+    if (m !== lastMonth) {
+      months += `<text x="${leftPad + col * colW}" y="9" class="punch-label">${firstDate.toLocaleString('en-US', { month: 'short' })}</text>`;
+      lastMonth = m;
+    }
+    for (let row = 0; row < 7; row += 1) {
+      const idx = col * 7 + row;
+      const v = project.dailyActivity[idx];
+      const date = dailyDates[idx];
+      const x = leftPad + col * colW;
+      const y = topPad + row * rowH;
+      const dateLabel = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      if (v === null) {
+        cells += `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" class="contrib-cell contrib-cell-empty"><title>${dateLabel}: no data</title></rect>`;
+      } else {
+        const t = Math.min(1, v / maxV);
+        const isLow = t <= 0.04;
+        cells += isLow
+          ? `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" class="contrib-cell contrib-cell-empty"><title>${dateLabel}: ${Math.round(t * 100)}% of peak</title></rect>`
+          : `<rect x="${x}" y="${y}" width="${cell}" height="${cell}" rx="2" class="contrib-cell" fill="${color}" opacity="${(0.18 + t * 0.82).toFixed(2)}"><title>${dateLabel}: ${Math.round(t * 100)}% of peak</title></rect>`;
+      }
+    }
+  }
+  const rowLabels = [1, 3, 5].map((r) => `<text x="${leftPad - 6}" y="${topPad + r * rowH + cell * 0.8}" class="punch-label" text-anchor="end">${dailyRowLabels[r]}</text>`).join('');
+  return `<svg class="contrib-chart" viewBox="0 0 ${width} ${height}" width="100%" height="${height}" role="img" aria-label="Daily contribution activity, last 26 weeks">${months}${rowLabels}${cells}</svg>`;
+}
+
+function contributionStats(project) {
+  const data = project.dailyActivity;
+  const isActive = (v) => v !== null && v > 0.05;
+  let current = 0;
+  for (let i = data.length - 1; i >= 0; i -= 1) {
+    if (isActive(data[i])) current += 1; else break;
+  }
+  let longest = 0;
+  let run = 0;
+  data.forEach((v) => { if (isActive(v)) { run += 1; longest = Math.max(longest, run); } else run = 0; });
+  const weekdaySums = Array.from({ length: 7 }, () => 0);
+  data.forEach((v, i) => { if (v !== null) weekdaySums[i % 7] += v; });
+  const topWeekday = Math.max(...weekdaySums) > 0 ? dailyRowLabels[weekdaySums.indexOf(Math.max(...weekdaySums))] : '—';
+  const weekSums = Array.from({ length: CONTRIB_WEEKS }, (_, col) => {
+    let sum = 0;
+    let any = false;
+    for (let r = 0; r < 7; r += 1) {
+      const v = data[col * 7 + r];
+      if (v !== null) { sum += v; any = true; }
+    }
+    return any ? sum : -1;
+  });
+  const maxWeekSum = Math.max(...weekSums);
+  const busiestLabel = maxWeekSum > 0 ? dailyDates[weekSums.indexOf(maxWeekSum) * 7].toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+  return [
+    { label: 'Current streak', value: `${current}d` },
+    { label: 'Longest streak', value: `${longest}d` },
+    { label: 'Most active day', value: topWeekday },
+    { label: 'Busiest week of', value: busiestLabel },
+  ];
+}
+
+function contributionCalendarSection(project) {
+  const stats = contributionStats(project);
+  return `<section class="panel contrib-panel">
+    <div class="panel-header"><div><h2 class="panel-title">Contribution calendar</h2><p class="panel-subtitle">Daily commit activity — last 26 weeks</p></div><span class="eyebrow">Through Aug 03</span></div>
+    <div class="contrib-stats">${stats.map((s) => `<div class="contrib-stat"><span class="chart-caption-label">${s.label}</span><span class="chart-caption-value">${s.value}</span></div>`).join('')}</div>
+    <div class="contrib-wrap">${contributionCalendar(project)}</div>
+  </section>`;
 }
 
 const viewLabels = { overview: 'Overview', projects: 'Projects', insights: 'Insights', 'review-log': 'Review log', boundaries: 'Project boundaries', rules: 'Signal rules' };
@@ -253,7 +508,7 @@ function renderProjects() {
   const filtered = currentFilter === 'All projects' ? projects : projects.filter((project) => project.status === currentFilter);
   return `
     <div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1><p>Every project boundary, current attention status, and data freshness in one place.</p></div><div class="heading-actions"><button class="secondary-button" id="export-projects">Export inventory</button><button class="primary-button" id="add-project">Add project boundary <span>+</span></button></div></div>
-    <div class="detail-shell"><div class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${projects.length} projects shown · evidence snapshots from Aug 03, 2026</p></div><div class="filter-row">${['All projects', 'At risk', 'Watch', 'Clear'].map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${filter}">${filter}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Trace</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.map((project) => `<tr class="${selectedProject.id === project.id ? 'selected' : ''}" data-project-id="${project.id}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${project.name}</strong><span>${project.team} · ${project.repo}</span></div></div></td><td>${statusPill(project)}</td><td>${signalStrip(project)}</td><td>${project.signal}</td><td><span class="freshness">${project.lastActivity}</span></td><td><span class="freshness">${project.status === 'Insufficient data' ? 'Needs mapping' : 'Complete · 97%'}</span></td></tr>`).join('')}</tbody></table></div><div class="table-footer"><span>Boundaries are versioned and reviewed by project owners.</span><button class="panel-link" id="boundary-link">Manage boundaries →</button></div></div>${renderDetail(selectedProject)}</div>`;
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${projects.length} projects shown · evidence snapshots from Aug 03, 2026</p></div><div class="filter-row">${['All projects', 'At risk', 'Watch', 'Clear'].map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${filter}">${filter}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Trace</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.map((project) => `<tr class="project-row" data-project-id="${project.id}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${project.name}</strong><span>${project.team} · ${project.repo}</span></div></div></td><td>${statusPill(project)}</td><td>${signalStrip(project)}</td><td>${project.signal}</td><td><span class="freshness">${project.lastActivity}</span></td><td><span class="freshness">${project.status === 'Insufficient data' ? 'Needs mapping' : 'Complete · 97%'}</span></td></tr>`).join('')}</tbody></table></div><div class="table-footer"><span>Boundaries are versioned and reviewed by project owners.</span><button class="panel-link" id="boundary-link">Manage boundaries →</button></div></section>`;
 }
 
 function renderInsights() {
@@ -264,13 +519,12 @@ function renderInsights() {
       <table class="insights-table">
         <thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th><th>Contributors</th></tr></thead>
         <tbody>${projects.map((project) => {
-          const color = statusColor(project.statusClass);
           return `<tr class="insights-row" data-project-id="${project.id}">
             <td><div class="table-project">${monogram(project, 'sm')}<div><strong>${project.name}</strong><span>${project.team}</span></div></div>${statusPill(project)}</td>
-            <td>${sparkChart(project.series.activity, { color, width: 150, height: 40, area: false })}</td>
-            <td>${sparkChart(project.series.openPRs, { color, baseline: project.seriesBaselines.openPRs[0], width: 150, height: 40, area: false })}</td>
-            <td>${sparkChart(project.series.reviewLatency, { color, baseline: project.seriesBaselines.reviewLatency[0], width: 150, height: 40, area: false, suffix: 'd' })}</td>
-            <td>${sparkChart(project.series.contributors, { color, baseline: project.seriesBaselines.contributors[0], width: 150, height: 40, area: false })}</td>
+            <td>${chartCaption('', lastValue(project.series.activity), null)}</td>
+            <td>${chartCaption('', lastValue(project.series.openPRs), project.seriesBaselines.openPRs[0])}</td>
+            <td>${chartCaption('', lastValue(project.series.reviewLatency), project.seriesBaselines.reviewLatency[0], 'd')}</td>
+            <td>${chartCaption('', lastValue(project.series.contributors), project.seriesBaselines.contributors[0])}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
@@ -299,11 +553,6 @@ function evidenceRow(project, item, size = '') {
 function evidenceList(project, size = '') {
   if (!project.evidence.length) return `<div class="evidence-item"><span class="evidence-marker teal">${icon('check-circle')}</span><div class="evidence-copy"><strong>No current concern</strong></div></div>`;
   return project.evidence.map((item) => evidenceRow(project, item, size)).join('');
-}
-
-function renderDetail(project) {
-  const meta = statusMeta[project.statusClass];
-  return `<section class="panel detail-panel"><div class="detail-top"><div class="detail-project">${monogram(project)}<div><h2>${project.name}</h2><p>${project.team} · ${project.repo}</p></div>${signalStrip(project)}</div><div class="detail-top-actions"><button class="panel-link" id="open-profile">Full report →</button><button class="detail-close" id="close-detail" aria-label="Close project detail">×</button></div></div><div class="detail-status ${project.statusClass}"><strong>${project.status}</strong><span>${meta.copy}</span></div><div class="evidence-section"><div class="evidence-heading"><span>Evidence</span><span>Snapshot · Aug 03</span></div>${evidenceList(project)}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${meta.cta} <span>→</span></button></div></section>`;
 }
 
 const chartMetrics = [
@@ -346,18 +595,16 @@ function renderProjectProfile(project) {
     </div>
     <div class="detail-status wide ${project.statusClass}"><strong>${project.status}</strong><span>${meta.copy}</span></div>
     ${metricCharts(project)}
+    ${codeInsightsSection(project)}
+    ${contributionCalendarSection(project)}
     <div class="profile-grid">
       <section class="panel">
         <div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Signal vs. this project's own baseline</p></div><span class="eyebrow">Snapshot · Aug 03</span></div>
         <div class="evidence-section wide">${evidenceList(project, 'lg')}</div>
         <div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${meta.cta} <span>→</span></button></div>
       </section>
-      <div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div>
+      <div class="profile-side">${contributorsCard(project)}${boundaryCard(project)}${historyCard(project)}</div>
     </div>`;
-}
-
-function renderDetailShell() {
-  return `<div class="detail-shell"><section class="panel queue-panel"><div class="panel-header"><div><h2 class="panel-title">Attention queue</h2><p class="panel-subtitle">Select a project to inspect the evidence behind its status.</p></div><span class="eyebrow">${projects.filter((project) => project.status === 'At risk' || project.status === 'Watch').length} flagged</span></div><div class="queue-list">${projects.filter((project) => project.status === 'At risk' || project.status === 'Watch').map((project) => `<div class="queue-item"><div>${monogram(project)}</div><div class="queue-main"><div class="queue-name-line"><span class="queue-name">${project.name}</span>${statusPill(project)}</div><div class="queue-meta">${project.team} · ${project.signalDetail}</div></div><button class="queue-action view-project" data-project-id="${project.id}">Inspect →</button></div>`).join('')}</div><div class="table-footer"><span>Evidence is project-level and intentionally explainable.</span><button class="panel-link" id="back-to-overview">Back to overview</button></div></section>${renderDetail(selectedProject)}</div>`;
 }
 
 function renderUtilityView(view) {
@@ -408,25 +655,21 @@ function bindViewEvents() {
     currentView = 'profile';
     render();
   }));
-  document.querySelectorAll('[data-project-id]:not(.view-project):not(.insights-row)').forEach((row) => row.addEventListener('click', () => { selectedProject = projects.find((project) => project.id === row.dataset.projectId) || selectedProject; render(); }));
-  document.querySelectorAll('.insights-row').forEach((row) => row.addEventListener('click', () => {
+  document.querySelectorAll('.insights-row, .project-row').forEach((row) => row.addEventListener('click', () => {
     selectedProject = projects.find((project) => project.id === row.dataset.projectId) || selectedProject;
     currentView = 'profile';
     render();
   }));
   document.getElementById('profile-back')?.addEventListener('click', () => { currentView = 'projects'; render(); });
-  document.getElementById('open-profile')?.addEventListener('click', () => { currentView = 'profile'; render(); });
   document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', () => { currentFilter = button.dataset.filter; render(); }));
   document.querySelectorAll('#review-button, #banner-review').forEach((button) => button.addEventListener('click', () => { currentView = 'projects'; currentFilter = 'All projects'; render(); }));
   document.getElementById('queue-filter')?.addEventListener('click', () => { currentView = 'projects'; currentFilter = 'All projects'; render(); });
   document.getElementById('review-log-button')?.addEventListener('click', () => { currentView = 'review-log'; render(); });
-  document.getElementById('back-to-overview')?.addEventListener('click', () => { currentView = 'overview'; render(); });
   document.getElementById('back-overview')?.addEventListener('click', () => { currentView = 'overview'; render(); });
   document.getElementById('boundary-link')?.addEventListener('click', () => { currentView = 'boundaries'; render(); });
   document.getElementById('coverage-details')?.addEventListener('click', () => { currentView = 'boundaries'; render(); showToast('Data quality view opened'); });
   document.getElementById('add-project')?.addEventListener('click', () => showToast('Boundary creation is mocked for this demo'));
   document.getElementById('export-projects')?.addEventListener('click', () => showToast('Project inventory exported (mock)'));
-  document.getElementById('close-detail')?.addEventListener('click', () => { currentView = 'projects'; render(); });
   document.getElementById('add-context')?.addEventListener('click', () => openFeedback(selectedProject));
   document.getElementById('confirm-review')?.addEventListener('click', () => openFeedback(selectedProject));
 }
