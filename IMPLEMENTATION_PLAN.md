@@ -1,4 +1,4 @@
-# Project Health Intelligence — Implementation Plan
+# App Dev Horizon — Implementation Plan
 
 Status: draft for Phase 0 review
 Owner: TBD (needs a named executive sponsor before Phase 0 exits)

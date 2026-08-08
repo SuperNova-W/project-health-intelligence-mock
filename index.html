@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#063e92" />
-    <title>Project Health Intelligence</title>
+    <title>App Dev Horizon</title>
+    <link rel="icon" href="assets/adc-256.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -14,9 +15,9 @@
     <div class="app-shell">
       <aside class="sidebar" aria-label="Primary navigation">
         <div class="brand-lockup">
-          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <img class="brand-mark" src="assets/adc-256.png" width="34" height="34" alt="App Dev Club" />
           <div>
-            <div class="brand-name">Project Health</div>
+            <div class="brand-name">App Dev Horizon</div>
             <div class="brand-caption">INTELLIGENCE</div>
           </div>
         </div>
@@ -32,7 +33,7 @@
 
         <nav class="primary-nav" id="primary-nav">
           <div class="nav-section-label">Review</div>
-          <button class="nav-item active" data-view="overview"><span class="nav-icon" data-icon="grid"></span><span>Overview</span><span class="nav-count">3</span></button>
+          <button class="nav-item active" data-view="overview"><span class="nav-icon" data-icon="grid"></span><span>Overview</span><span class="nav-count">—</span></button>
           <button class="nav-item" data-view="projects"><span class="nav-icon" data-icon="folder"></span><span>Projects</span></button>
           <button class="nav-item" data-view="insights"><span class="nav-icon" data-icon="trend"></span><span>Insights</span></button>
           <button class="nav-item" data-view="review-log"><span class="nav-icon" data-icon="clipboard"></span><span>Review log</span></button>
@@ -44,9 +45,9 @@
         <div class="sidebar-spacer"></div>
 
         <div class="coverage-card">
-          <div class="coverage-topline"><span class="coverage-icon" data-icon="database"></span><span>Data coverage</span><span class="coverage-percent">97%</span></div>
-          <div class="coverage-bar"><span></span></div>
-          <p>Last sync completed 26 min ago</p>
+          <div class="coverage-topline"><span class="coverage-icon" data-icon="database"></span><span>Data coverage</span><span class="coverage-percent">—</span></div>
+          <div class="coverage-bar"><span style="width:0%"></span></div>
+          <p>Waiting for latest snapshot</p>
           <button class="text-button" id="coverage-details">View data quality <span>→</span></button>
         </div>
         <div class="sidebar-footer">
@@ -58,10 +59,9 @@
 
       <main class="main-content">
         <header class="topbar">
-          <div class="breadcrumbs"><span>Project Health Intelligence</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb-current">Overview</strong></div>
+          <div class="breadcrumbs"><span>App Dev Horizon</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb-current">Overview</strong></div>
           <div class="topbar-actions">
-            <span class="live-status"><span class="live-dot"></span>Live data</span>
-            <button class="topbar-icon" aria-label="Notifications" title="Notifications"><span data-icon="bell"></span><span class="notification-dot"></span></button>
+            <button class="topbar-icon" aria-label="Outbound notifications are disabled" title="Outbound notifications are disabled"><span data-icon="bell"></span></button>
             <button class="avatar-button" aria-label="Open profile">JK</button>
           </div>
         </header>
@@ -79,10 +79,10 @@
         <h2 id="feedback-title">Add context to this warning</h2>
         <p id="feedback-project-name">Tell the team what leadership should know about this project.</p>
         <div class="feedback-options" id="feedback-options">
-          <button data-feedback="Risk confirmed"><span data-icon="check-circle"></span>Risk confirmed</button>
-          <button data-feedback="Expected project cycle"><span data-icon="calendar"></span>Expected cycle</button>
-          <button data-feedback="Data quality problem"><span data-icon="triangle"></span>Data quality issue</button>
-          <button data-feedback="Planned pause"><span data-icon="pause"></span>Planned pause</button>
+          <button data-feedback="risk_confirmed"><span data-icon="check-circle"></span>Risk confirmed</button>
+          <button data-feedback="expected_cycle"><span data-icon="calendar"></span>Expected cycle</button>
+          <button data-feedback="data_quality"><span data-icon="triangle"></span>Data quality issue</button>
+          <button data-feedback="planned_pause"><span data-icon="pause"></span>Planned pause</button>
         </div>
         <label class="modal-label" for="feedback-note">Optional note</label>
         <textarea id="feedback-note" rows="3" placeholder="Add a short explanation for the next review..."></textarea>

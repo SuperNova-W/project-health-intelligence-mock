@@ -1,8 +1,8 @@
 {
-  "name": "project-health-intelligence-mock",
+  "name": "app-dev-horizon-mock",
   "version": "0.1.0",
   "private": true,
-  "description": "Standalone product vision mock for Project Health Intelligence.",
+  "description": "Standalone product vision mock for App Dev Horizon.",
   "scripts": {
     "start": "python3 -m http.server 4173 --bind 127.0.0.1",
     "dev": "python3 -m http.server 4173 --bind 127.0.0.1"
