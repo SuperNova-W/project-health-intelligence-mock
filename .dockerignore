@@ -1,0 +1,6 @@
+.git
+.venv
+.pytest_cache
+.live-test-token
+__pycache__
+*.py[cod]

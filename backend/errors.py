@@ -27,4 +27,3 @@ class EvidenceTraceError(ProjectHealthError, ValueError):
 
 class ImmutableSnapshotError(ProjectHealthError):
     """An attempt was made to mutate an already-written weekly snapshot."""
-

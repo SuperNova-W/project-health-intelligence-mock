@@ -92,12 +92,6 @@ class _PreparedMetric(NamedTuple):
     meets_minimum_data: bool
 
 
-def _as_mapping(value: Any) -> Mapping[str, Any] | None:
-    if isinstance(value, Mapping):
-        return value
-    return None
-
-
 def _field(value: Any, name: str, default: Any = None) -> Any:
     """Read one field from a mapping or a small dataclass-like object."""
 

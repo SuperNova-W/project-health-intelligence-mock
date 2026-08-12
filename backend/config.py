@@ -66,6 +66,18 @@ class Settings(BaseSettings):
             "AUTHENTIK_API_TOKEN",
         ),
     )
+    people_portal_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PHI_PEOPLE_PORTAL_URL", "PEOPLE_PORTAL_URL"),
+    )
+    people_portal_api_token: str | None = Field(
+        default=None,
+        repr=False,
+        validation_alias=AliasChoices(
+            "PHI_PEOPLE_PORTAL_API_TOKEN",
+            "PEOPLE_PORTAL_API_TOKEN",
+        ),
+    )
     authentik_oidc_issuer_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
@@ -111,6 +123,14 @@ class Settings(BaseSettings):
         default=None,
         repr=False,
         validation_alias=AliasChoices("PHI_GITEA_API_TOKEN", "GITEA_API_TOKEN"),
+    )
+    gitea_org: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "PHI_GITEA_ORG",
+            "GITEA_ORG",
+            "GITEA_ORGANIZATION",
+        ),
     )
 
     dev_auth: bool = Field(

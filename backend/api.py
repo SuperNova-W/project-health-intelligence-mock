@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Annotated, Any
+from typing import Any
 
 from beanie import PydanticObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -11,21 +11,16 @@ from .auth import AuthUser, get_current_user, require_project_access, require_ro
 from .config import Settings, get_settings
 from .db import get_active_repository
 from .models import (
-    AggregateMetrics,
     AttentionStatus,
     AuditLogDocument,
     BoundaryDocument,
     BoundaryView,
     FeedbackCategory,
     FeedbackDocument,
-    HistoryItem,
-    LifecycleState,
     ProjectResponse,
     PublicAggregateMetrics,
     RepositoryRef,
     Role,
-    Series,
-    SeriesBaselines,
     WarningDocument,
     WeeklySnapshotDocument,
 )
@@ -186,7 +181,14 @@ def _snapshot_envelope(snapshots: list[WeeklySnapshotDocument], projects: list[d
 
 @router.get("/health")
 async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
-    return {"status": "ok", "environment": settings.environment, "mongo_configured": bool(settings.mongo_uri), "outbound_notifications": False}
+    return {
+        "status": "ok",
+        "environment": settings.environment,
+        "mongo_configured": bool(settings.mongo_uri),
+        "directory_source": "people_portal" if settings.people_portal_url else "authentik" if settings.authentik_url else None,
+        "people_portal_configured": bool(settings.people_portal_url),
+        "outbound_notifications": False,
+    }
 
 
 @router.get("/snapshots/latest")

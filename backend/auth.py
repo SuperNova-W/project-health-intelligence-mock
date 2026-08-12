@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -12,7 +11,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings, get_settings
-from .errors import AuthenticationError, AuthorizationError
+from .errors import AuthenticationError
 from .models import ProjectId, Role
 
 
@@ -190,4 +189,3 @@ def visible_project_ids(user: AuthUser, all_project_ids: list[ProjectId]) -> lis
     if user.can_view_portfolio:
         return list(all_project_ids)
     return [project_id for project_id in all_project_ids if project_id in user.project_ids]
-

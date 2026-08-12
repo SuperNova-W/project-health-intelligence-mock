@@ -10,10 +10,10 @@ validated.
 from __future__ import annotations
 
 import inspect
-import os
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
+from math import ceil
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -23,6 +23,7 @@ from .db import get_active_repository
 from .ingestion import (
     AuthentikTeamHierarchyAdapter,
     GiteaRepoActivityAdapter,
+    PeoplePortalDirectoryAdapter,
     SyncResult,
 )
 from .models import (
@@ -34,7 +35,14 @@ from .models import (
     WarningSeverity,
     WeeklySnapshotDocument,
 )
+from .resolvers import build_boundary_resolver, build_team_size_resolver
 from .rules import evaluate_mvp_rules
+from .staging import (
+    REPO_ACTIVITY_STAGING_COLLECTION,
+    fold_people_portal_catalog,
+    fold_staging_activity,
+    open_staging_store,
+)
 
 
 WEEKLY_SNAPSHOTS_COLLECTION = "weekly_snapshots"
@@ -131,6 +139,22 @@ def _project_ids(row: Any) -> list[str]:
         return [str(item) for item in value if item not in (None, "")]
     project_id = _field(row, "project_id")
     return [str(project_id)] if project_id not in (None, "") else []
+
+
+def _record_week(record: Mapping[str, Any]) -> date | None:
+    """Return the ISO week-start date a folded history record belongs to."""
+
+    value = record.get("week_start")
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _history_by_project(rows: Sequence[Any]) -> dict[str, list[dict[str, Any]]]:
@@ -264,6 +288,23 @@ def _warning_severity(triggered_count: int) -> WarningSeverity:
     return WarningSeverity.CRITICAL if triggered_count >= 3 else WarningSeverity.WARNING
 
 
+def _trend_series(history: Sequence[Mapping[str, Any]], key: str) -> list[float | int | None]:
+    """Trailing 8-week series for one metric, left-padded with None."""
+
+    trimmed = list(history[-8:])
+    padded: list[Mapping[str, Any] | None] = [None] * (8 - len(trimmed)) + trimmed
+    return [None if record is None else record.get(key) for record in padded]
+
+
+def _series_baseline(values: Sequence[float | int | None]) -> list[float | int | None]:
+    """[earliest, latest] non-null pair a trend caption compares against."""
+
+    observed = [value for value in values if value is not None]
+    if not observed:
+        return [None, None]
+    return [observed[0], observed[-1]]
+
+
 def _status_for_results(
     results: Mapping[str, Mapping[str, Any]],
     *,
@@ -323,10 +364,40 @@ async def _call_sync(adapter: Any, kwargs: Mapping[str, Any]) -> SyncResult:
     raise TypeError("sync hook returned an unsupported result")
 
 
+async def build_gitea_adapter(
+    settings: Settings,
+    database: Any,
+    staging: Any,
+    *,
+    at: date | None = None,
+) -> GiteaRepoActivityAdapter:
+    """Construct the Gitea adapter with its boundary seams closed.
+
+    Both resolvers are required for a useful result.  Without the boundary
+    resolver no repository maps to a project and every snapshot degrades to
+    ``insufficient_data``; without the team-size resolver the aggregation
+    floor can never be satisfied and contributor signals never appear.
+    """
+
+    return GiteaRepoActivityAdapter(
+        staging,
+        base_url=settings.gitea_url,
+        token=settings.gitea_api_token,
+        organization=settings.gitea_org,
+        aggregation_floor=settings.aggregation_floor,
+        collection_name=REPO_ACTIVITY_STAGING_COLLECTION,
+        boundary_resolver=await build_boundary_resolver(database, at=at),
+        # Authentik writes its hierarchy to the raw staging store. Reading the
+        # resolver from that same store also works in local in-memory runs.
+        team_size_resolver=await build_team_size_resolver(staging, at=at, boundaries=database),
+    )
+
+
 async def run_nightly_sync(
     settings: Settings | None = None,
     database: Any = None,
     *,
+    staging: Any = None,
     authentik_adapter: Any = None,
     gitea_adapter: Any = None,
     now: datetime | None = None,
@@ -336,39 +407,68 @@ async def run_nightly_sync(
 
     settings = settings or get_settings()
     database = database or get_active_repository()
+    owns_staging = staging is None
+    staging = staging or open_staging_store(settings)
     started = now or _utc_now()
     cycle_id = f"sync_{started.strftime('%Y%m%d%H%M%S')}_{started.microsecond}"
+    directory_source = "people_portal" if settings.people_portal_url else "authentik"
     if authentik_adapter is None:
-        authentik_adapter = AuthentikTeamHierarchyAdapter(
-            database,
-            base_url=settings.authentik_url,
-            token=settings.authentik_api_token,
-            aggregation_floor=settings.aggregation_floor,
-        )
-    if gitea_adapter is None:
-        authentik_org = os.getenv("GITEA_ORG") or os.getenv("GITEA_ORGANIZATION")
-        gitea_adapter = GiteaRepoActivityAdapter(
-            database,
-            base_url=settings.gitea_url,
-            token=settings.gitea_api_token,
-            organization=authentik_org,
-            aggregation_floor=settings.aggregation_floor,
-        )
+        if settings.people_portal_url:
+            authentik_adapter = PeoplePortalDirectoryAdapter(
+                staging,
+                base_url=settings.people_portal_url,
+                token=settings.people_portal_api_token,
+                aggregation_floor=settings.aggregation_floor,
+            )
+        else:
+            authentik_adapter = AuthentikTeamHierarchyAdapter(
+                staging,
+                base_url=settings.authentik_url,
+                token=settings.authentik_api_token,
+                aggregation_floor=settings.aggregation_floor,
+            )
     try:
+        # The team pull runs first: the Gitea adapter's floor gate reads the
+        # sizes it stages, so building that adapter earlier would resolve
+        # every team size to None on a first run.
         team_result = await _call_sync(
             authentik_adapter,
             {"sync_cycle_id": cycle_id, "synced_at": _iso(started)},
         )
-        repo_result = await _call_sync(
-            gitea_adapter,
-            {
-                "sync_cycle_id": cycle_id,
-                "synced_at": _iso(started),
-                "since": started - timedelta(days=max(0, int(lookback_days))),
-                "until": started,
-                "backfill": False,
-            },
+        catalog_result = (
+            await fold_people_portal_catalog(database, staging)
+            if directory_source == "people_portal" and team_result.status != "not_configured"
+            else None
         )
+        if gitea_adapter is None:
+            gitea_adapter = await build_gitea_adapter(
+                settings,
+                database,
+                staging,
+                at=started.date(),
+            )
+        # Windows are ISO-week aligned rather than a rolling lookback: an
+        # activity row is bucketed by the lower bound it was given, and a
+        # rolling bound would land between weeks and never match the week
+        # being snapshotted.  Recent whole weeks are re-pulled so that
+        # late-arriving reviews and merges still land in their own week.
+        weeks_back = max(1, ceil(max(0, int(lookback_days)) / 7) or 1)
+        repo_results: list[SyncResult] = []
+        for window_start, window_end in _week_windows(weeks_back, through=started.date()):
+            repo_results.append(
+                await _call_sync(
+                    gitea_adapter,
+                    {
+                        "sync_cycle_id": f"{cycle_id}_{window_start.isoformat()}",
+                        "synced_at": _iso(started),
+                        "since": datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc),
+                        "until": min(started, datetime.combine(window_end, datetime.max.time(), tzinfo=timezone.utc)),
+                        "backfill": False,
+                    },
+                )
+            )
+        repo_result = _merge_sync_results(repo_results)
+        fold_result = await fold_staging_activity(database, staging)
         statuses = {team_result.status, repo_result.status}
         return {
             "status": (
@@ -379,13 +479,154 @@ async def run_nightly_sync(
                 else "partial"
             ),
             "sync_cycle_id": cycle_id,
-            "authentik": team_result.as_dict(),
+            "directory_source": directory_source,
+            "directory": team_result.as_dict(),
+            "authentik": team_result.as_dict() if directory_source == "authentik" else None,
+            "people_portal": team_result.as_dict() if directory_source == "people_portal" else None,
+            "project_catalog": catalog_result,
             "gitea": repo_result.as_dict(),
+            "fold": fold_result,
             "outbound_notifications": False,
         }
     finally:
         for adapter in (authentik_adapter, gitea_adapter):
             closer = getattr(adapter, "close", None)
+            if closer is not None:
+                closer()
+        if owns_staging:
+            closer = getattr(staging, "close", None)
+            if closer is not None:
+                closer()
+
+
+def _merge_sync_results(results: Sequence[SyncResult]) -> SyncResult:
+    """Combine per-window sync results into one reportable outcome."""
+
+    if not results:
+        return SyncResult(status="not_configured", sync_cycle_id="", synced_at="")
+    statuses = {result.status for result in results}
+    status = "ok" if statuses == {"ok"} else "not_configured" if statuses == {"not_configured"} else "partial"
+    flags: list[str] = []
+    for result in results:
+        flags.extend(result.data_quality_flags)
+    return SyncResult(
+        status=status,
+        sync_cycle_id=results[-1].sync_cycle_id,
+        synced_at=results[-1].synced_at,
+        records_written=sum(result.records_written for result in results),
+        evidence_rows_written=sum(result.evidence_rows_written for result in results),
+        repos_seen=max(result.repos_seen for result in results),
+        data_quality_flags=tuple(sorted(set(flags))),
+    )
+
+
+def _week_windows(weeks: int, *, through: date) -> list[tuple[date, date]]:
+    """Return ``weeks`` consecutive Monday-start windows ending at ``through``.
+
+    The most recent window is the ISO week containing ``through``; earlier
+    windows run backwards from it.  Windows are returned oldest first so the
+    resulting history is appended in chronological order.
+    """
+
+    if weeks <= 0:
+        raise ValueError("weeks must be a positive integer")
+    latest_start = through - timedelta(days=through.weekday())
+    windows = [
+        (latest_start - timedelta(weeks=offset), latest_start - timedelta(weeks=offset) + timedelta(days=6))
+        for offset in range(weeks)
+    ]
+    return list(reversed(windows))
+
+
+async def run_weekly_backfill(
+    settings: Settings | None = None,
+    database: Any = None,
+    *,
+    staging: Any = None,
+    gitea_adapter: Any = None,
+    weeks: int = 10,
+    through: date | None = None,
+    generate_snapshots: bool = True,
+    rule_set_version: str | None = None,
+) -> dict[str, Any]:
+    """Replay Gitea history one week at a time, then snapshot each week.
+
+    A single wide-range replay is not sufficient to seed baselines.  The
+    activity row records ``window_start`` from the lower bound it was given,
+    so one call over ten weeks produces one observation, and the rule engine
+    requires at least four *prior* weekly observations before any signal
+    clears its minimum-data gate.  Each week is therefore pulled as its own
+    bounded window, and snapshots are generated in chronological order so that
+    every week sees only the history that preceded it.
+    """
+
+    settings = settings or get_settings()
+    database = database or get_active_repository()
+    owns_staging = staging is None
+    staging = staging or open_staging_store(settings)
+    owns_adapter = gitea_adapter is None
+    windows = _week_windows(weeks, through=through or _utc_now().date())
+    started = _utc_now()
+
+    week_results: list[dict[str, Any]] = []
+    snapshots_created = 0
+    try:
+        for window_start, window_end in windows:
+            adapter = gitea_adapter
+            if adapter is None:
+                # Boundaries are resolved as of the window being replayed, so
+                # a historical week uses the boundary version in force then.
+                adapter = await build_gitea_adapter(
+                    settings,
+                    database,
+                    staging,
+                    at=window_start,
+                )
+            cycle_id = f"backfill_{window_start.isoformat()}_{started.strftime('%H%M%S')}"
+            since = datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
+            until = datetime.combine(window_end, datetime.max.time(), tzinfo=timezone.utc)
+            try:
+                result = await _call_sync(
+                    adapter,
+                    {
+                        "sync_cycle_id": cycle_id,
+                        "synced_at": _iso(started),
+                        "since": since,
+                        "until": until,
+                        "backfill": True,
+                    },
+                )
+            finally:
+                if owns_adapter:
+                    closer = getattr(adapter, "close", None)
+                    if closer is not None:
+                        closer()
+            week_results.append({"week_start": window_start.isoformat(), **result.as_dict()})
+
+        fold_result = await fold_staging_activity(database, staging)
+
+        if generate_snapshots:
+            for window_start, _ in windows:
+                snapshots_created += await generate_weekly_snapshots(
+                    settings=settings,
+                    database=database,
+                    week_start=window_start,
+                    rule_set_version=rule_set_version,
+                )
+
+        statuses = {entry.get("status") for entry in week_results}
+        return {
+            "status": "ok" if statuses == {"ok"} else "not_configured" if statuses == {"not_configured"} else "partial",
+            "job": "weekly_backfill",
+            "weeks_requested": weeks,
+            "weeks": week_results,
+            "fold": fold_result,
+            "snapshots_written": snapshots_created,
+            "outbound_notifications": False,
+        }
+    finally:
+        if owns_staging:
+            closer = getattr(staging, "close", None)
             if closer is not None:
                 closer()
 
@@ -428,17 +669,35 @@ async def generate_weekly_snapshots(
     version = rule_set_version or settings.rule_set_version
     projects = await database.list("projects")
     activity_rows = await database.list("repo_activity")
+    existing_snapshots = await database.list("snapshots")
+    existing_keys = {
+        (str(snapshot.project_id), snapshot.week_start, str(snapshot.rule_set_version))
+        for snapshot in existing_snapshots
+    }
     histories = _history_by_project(activity_rows)
     created = 0
 
     for project in projects:
         project_id = str(project.project_id)
+        if (project_id, week_start, version) in existing_keys:
+            # Snapshot identity is unique at this grain. A scheduler retry or
+            # overlapping backfill is therefore a successful no-op, while a
+            # new rule-set version still appends a new immutable record.
+            continue
         decision = project.scoring_decision(week_start, week_end)
-        history = histories.get(project_id, [])
+        # History is truncated at the week being generated so that replaying
+        # past weeks scores each one against only the data that preceded it.
+        # Without this a backfill would score every historical week using the
+        # newest observation and emit identical warnings for all of them.
+        history = [
+            record
+            for record in histories.get(project_id, [])
+            if _record_week(record) is not None and _record_week(record) <= week_start
+        ]
         # A current empty record keeps the rule engine's insufficient-data
         # status explicit instead of allowing an empty history to look clear.
-        if not history:
-            history = [{"week_start": week_start, "data_completeness_pct": 0, "source_ref": f"missing:{project_id}:{week_start}"}]
+        if not history or _record_week(history[-1]) != week_start:
+            history = history + [{"week_start": week_start, "data_completeness_pct": 0, "source_ref": f"missing:{project_id}:{week_start}"}]
         current = history[-1]
         rule_input = {
             "weeks": history,
@@ -487,6 +746,21 @@ async def generate_weekly_snapshots(
         metrics_payload["last_sync_at"] = _parse_datetime(metrics_payload.get("last_sync_at"))
         metrics = AggregateMetrics(**metrics_payload)
 
+        series: dict[str, list[float | int | None]] = {
+            "activity": _trend_series(history, "active_days"),
+            "open_prs": _trend_series(history, "open_prs"),
+            "review_latency": _trend_series(history, "review_latency_days"),
+        }
+        contributors_series = _trend_series(history, "active_contributors")
+        if "active_contributors" in metrics_payload:
+            series["contributors"] = contributors_series
+        series_baselines = {
+            "open_prs": _series_baseline(series["open_prs"]),
+            "review_latency": _series_baseline(series["review_latency"]),
+        }
+        if "contributors" in series:
+            series_baselines["contributors"] = _series_baseline(series["contributors"])
+
         warning_documents: list[WarningDocument] = []
         triggered_count = sum(1 for result in results.values() if result.get("meets_minimum_data") and result.get("evidence"))
         snapshot_id = PydanticObjectId()
@@ -533,12 +807,15 @@ async def generate_weekly_snapshots(
             metrics=metrics,
             baselines=None,
             warning_ids=[warning.id for warning in warning_documents if warning.id is not None],
+            series=series,
+            series_baselines=series_baselines,
         )
         for warning in warning_documents:
             await database.add("warnings", warning)
         # This is intentionally add/insert only. No existing snapshot is read
         # or mutated, so reruns remain new historical records with a version.
         await database.add("snapshots", snapshot)
+        existing_keys.add((project_id, week_start, version))
         created += 1
     return created
 
@@ -635,7 +912,9 @@ register_jobs = register_scheduled_jobs
 __all__ = [
     "WEEKLY_SNAPSHOTS_COLLECTION",
     "run_nightly_sync",
+    "run_weekly_backfill",
     "run_historical_backfill",
+    "build_gitea_adapter",
     "generate_weekly_snapshots",
     "run_weekly_snapshot_job",
     "nightly_sync_job",

@@ -1,11 +1,7 @@
 const icons = {
   grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   folder: '<path d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2H18.5A2.5 2.5 0 0 1 21 8.5v7A2.5 2.5 0 0 1 18.5 18h-13A2.5 2.5 0 0 1 3 15.5Z"/>',
-  clipboard: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M8 9h8M8 13h8M8 17h5"/>',
-  waypoints: '<circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="19" cy="5" r="2"/><path d="M7 5h7a5 5 0 0 1 5 5v7M5 7v4a5 5 0 0 0 5 5h7"/>',
-  sliders: '<path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="11" cy="18" r="2" fill="currentColor" stroke="none"/>',
   database: '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v7c0 1.7 3.1 3 7 3s7-1.3 7-3V5M5 12v7c0 1.7 3.1 3 7 3s7-1.3 7-3v-7"/>',
-  bell: '<path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',
   calendar: '<rect x="3" y="4.5" width="18" height="17" rx="2"/><path d="M16 3v3M8 3v3M3 9h18M8 13h.01M12 13h.01M16 13h.01M8 17h.01M12 17h.01"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   'check-circle': '<circle cx="12" cy="12" r="9"/><path d="m8 12 2.7 2.7L16.5 9"/>',
@@ -15,14 +11,12 @@ const icons = {
   activity: '<path d="M3 12h4l2-6 4 12 2-6h6"/>',
   pull: '<path d="M6 3v18M6 7h8a3 3 0 0 1 3 3v1M18 8l2 3-2 3M6 17h8a3 3 0 0 0 3-3v-1"/>',
   users: '<path d="M16 20v-1.5a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4V20M9.5 10.5A3.5 3.5 0 1 0 9.5 3a3.5 3.5 0 0 0 0 7.5ZM17 11a3 3 0 1 0-1-5.8M21 20v-1.4a4 4 0 0 0-3-3.8"/>',
-  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   sparkle: '<path d="m12 3 1.3 5.7L19 10l-5.7 1.3L12 17l-1.3-5.7L5 10l5.7-1.3ZM19 17l.5 2.5L22 20l-2.5.5L19 23l-.5-2.5L16 20l2.5-.5Z"/>',
   trend: '<path d="M4 17 10 11l4 4 6-7M15 8h5v5"/>',
-  lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 15v2"/>',
 };
 
-function icon(name, className = '') {
-  return `<svg class="icon-svg ${className}" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.sparkle}</svg>`;
+function icon(name) {
+  return `<svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.sparkle}</svg>`;
 }
 
 document.querySelectorAll('[data-icon]').forEach((element) => {
@@ -45,7 +39,7 @@ const AGGREGATE_METRIC_KEYS = [
   'merged_count',
   'active_contributors',
 ];
-const viewLabels = { overview: 'Overview', projects: 'Projects', insights: 'Insights', 'review-log': 'Review log', boundaries: 'Project boundaries', rules: 'Signal rules' };
+const viewLabels = { overview: 'Overview', projects: 'Projects', insights: 'Insights' };
 const statusMeta = {
   risk: { copy: 'Needs a conversation with the team.', cta: 'Review warning' },
   watch: { copy: 'Emerging signal, worth a look.', cta: 'Review warning' },
@@ -61,15 +55,6 @@ const state = {
   projects: [],
   projectSnapshots: {},
   projectSnapshotMeta: {},
-  audit: null,
-  auditLoading: false,
-  auditError: null,
-  boundaries: null,
-  boundariesLoading: false,
-  boundariesError: null,
-  rules: null,
-  rulesLoading: false,
-  rulesError: null,
 };
 
 let currentView = 'overview';
@@ -92,6 +77,7 @@ function asArray(value) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || (typeof value === 'string' && !value.trim())) return null;
   const number = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -102,6 +88,14 @@ function firstDefined(...values) {
 
 function hasOwn(object, key) {
   return Boolean(object && Object.prototype.hasOwnProperty.call(object, key));
+}
+
+function isAttentionProject(project) {
+  return (project.statusClass === 'risk' || project.statusClass === 'watch') && project.evidence.length > 0;
+}
+
+function isActiveProject(project) {
+  return project.statusClass !== 'pause';
 }
 
 function normalizeSeries(value) {
@@ -426,15 +420,15 @@ function snapshotMetaMarkup(project = null, compact = false) {
   return `<div class="snapshot-meta ${compact ? 'compact' : ''}"><span>${escapeHtml(week)}</span><span>Data completeness ${escapeHtml(formatPercent(meta.dataCompletenessPct))}</span><span>Last sync ${escapeHtml(formatDate(meta.lastSyncAt, true))}</span></div>`;
 }
 
-function weekLabels() {
-  const start = state.snapshot?.snapshotWeekStart;
+function weekLabels(project = null) {
+  const start = snapshotMetaFor(project).snapshotWeekStart;
   if (!start) return Array.from({ length: 8 }, (_, index) => `Week ${index + 1}`);
   const end = new Date(start);
   if (Number.isNaN(end.getTime())) return Array.from({ length: 8 }, (_, index) => `Week ${index + 1}`);
   return Array.from({ length: 8 }, (_, index) => {
     const date = new Date(end);
-    date.setDate(date.getDate() - (7 * (7 - index)));
-    return date.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+    date.setUTCDate(date.getUTCDate() - (7 * (7 - index)));
+    return date.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' });
   });
 }
 
@@ -450,25 +444,34 @@ function monogram(project, className = '') {
   return `<div class="id-tag ${escapeHtml(project.statusClass)} ${className}">${escapeHtml(project.short)}</div>`;
 }
 
-function signalStrip(project, size = '') {
-  const ticks = project.weeks.map((value, index) => {
-    if (value === null) return '<span class="tick" style="height:100%;background:transparent;border-right:1px dashed var(--line-strong)" title="No data"></span>';
-    const flagged = index >= project.flagFrom && (project.statusClass === 'risk' || project.statusClass === 'watch');
-    const cls = flagged ? (project.statusClass === 'risk' ? 'flag-red' : 'flag-amber') : (value < 0.3 ? 'low' : '');
-    return `<span class="tick ${cls}" style="height:${Math.max(value, 0.06) * 100}%"></span>`;
-  }).join('');
-  return `<div class="signal-strip ${size}" title="8-week activity trace">${ticks}</div>`;
-}
-
-function sparkChart(points, { color = 'var(--ink)', baseline = null, width = 220, height = 56, suffix = '', area = true } = {}) {
+function chartDomain(points, baseline = null) {
   const values = points.filter((value) => value !== null);
-  if (!values.length) return `<div class="chart-empty" style="width:${width}px;height:${height}px">Insufficient data</div>`;
+  if (!values.length) return null;
   const allValues = baseline !== null ? values.concat([baseline]) : values;
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
   const span = max - min || Math.max(1, max * 0.2);
-  const domainMin = min - span * 0.2;
-  const domainMax = max + span * 0.2;
+  return { domainMin: min - span * 0.2, domainMax: max + span * 0.2 };
+}
+
+function formatChartTick(value, suffix = '', step = 1) {
+  const precision = step >= 10 ? 0 : step >= 1 ? 1 : step >= 0.1 ? 2 : 3;
+  const formatted = Number(value.toFixed(precision));
+  return `${formatted}${suffix}`;
+}
+
+function chartYAxis(points, baseline, suffix = '', label = 'chart') {
+  const domain = chartDomain(points, baseline);
+  if (!domain) return '<div class="chart-y-axis chart-y-axis-empty" aria-hidden="true"></div>';
+  const step = (domain.domainMax - domain.domainMin) / 4;
+  const ticks = Array.from({ length: 5 }, (_, index) => domain.domainMax - (step * index));
+  return `<div class="chart-y-axis" aria-label="${escapeHtml(label)} y-axis">${ticks.map((tick) => `<span>${escapeHtml(formatChartTick(tick, suffix, step))}</span>`).join('')}</div>`;
+}
+
+function sparkChart(points, { color = 'var(--ink)', baseline = null, width = 220, height = 56, suffix = '', area = true, labels = null, grid = false } = {}) {
+  const domain = chartDomain(points, baseline);
+  if (!domain) return `<div class="chart-empty" style="width:100%;height:${height}px">Insufficient data</div>`;
+  const { domainMin, domainMax } = domain;
   const stepX = points.length > 1 ? width / (points.length - 1) : width;
   const y = (value) => height - 6 - ((value - domainMin) / (domainMax - domainMin)) * (height - 12);
   const segments = [];
@@ -482,10 +485,21 @@ function sparkChart(points, { color = 'var(--ink)', baseline = null, width = 220
   const path = segments.map((segment) => `M${formatSegment(segment)}`).join(' ');
   const areaPath = segments.map((segment) => `M${formatSegment(segment)} L${segment.at(-1)[0].toFixed(1)} ${height} L${segment[0][0].toFixed(1)} ${height} Z`).join(' ');
   const last = segments.at(-1)?.at(-1);
-  const labels = weekLabels();
-  const dots = points.map((value, index) => value === null ? '' : `<circle class="chart-hit" cx="${(index * stepX).toFixed(1)}" cy="${y(value).toFixed(1)}" r="7" fill="transparent"><title>${escapeHtml(labels[index])}: ${escapeHtml(value)}${escapeHtml(suffix)}</title></circle>`).join('');
+  const chartLabels = labels || weekLabels();
+  const gridLines = grid ? [0.25, 0.5, 0.75].map((fraction) => `<line class="chart-grid" x1="0" y1="${(height * fraction).toFixed(1)}" x2="${width}" y2="${(height * fraction).toFixed(1)}"/>`).join('') : '';
+  const pointsMarkup = points.map((value, index) => {
+    if (value === null) return '';
+    const x = (index * stepX).toFixed(1);
+    const yy = y(value).toFixed(1);
+    const label = chartLabels[index] || `Week ${index + 1}`;
+    return `<circle class="chart-point" cx="${x}" cy="${yy}" r="2.7" fill="${color}"/><circle class="chart-hit" cx="${x}" cy="${yy}" r="9" fill="transparent"><title>${escapeHtml(label)}: ${escapeHtml(value)}${escapeHtml(suffix)}</title></circle>`;
+  }).join('');
   const baselineLine = baseline !== null ? `<line class="chart-baseline" x1="0" y1="${y(baseline).toFixed(1)}" x2="${width}" y2="${y(baseline).toFixed(1)}"/>` : '';
-  return `<svg class="spark-chart" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="none" role="img" aria-label="8-week trend">${baselineLine}${area ? `<path class="spark-area" d="${areaPath}" fill="${color}" opacity="0.12"/>` : ''}<path class="spark-line" d="${path}" stroke="${color}" fill="none"/>${last ? `<circle class="spark-end" cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/>` : ''}${dots}</svg>`;
+  return `<svg class="spark-chart" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" preserveAspectRatio="none" role="img" aria-label="8-week trend">${gridLines}${baselineLine}${area ? `<path class="spark-area" d="${areaPath}" fill="${color}" opacity="0.12"/>` : ''}<path class="spark-line" d="${path}" stroke="${color}" fill="none"/>${last ? `<circle class="spark-end" cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3.5" fill="${color}"/>` : ''}${pointsMarkup}</svg>`;
+}
+
+function chartTimestampAxis(labels) {
+  return `<div class="chart-axis-wrap"><div class="chart-axis" aria-label="Weekly chart timestamps">${labels.map((label, index) => `<span title="Week ${index + 1}: ${escapeHtml(label)}">${escapeHtml(label)}</span>`).join('')}</div><div class="chart-axis-note">Weekly timestamp · hover a point for its value</div></div>`;
 }
 
 function chartCaption(label, current, baseline, unit = '') {
@@ -501,11 +515,12 @@ function chartCaption(label, current, baseline, unit = '') {
 function metricCharts(project) {
   const color = statusColor(project.statusClass);
   const definitions = METRIC_DEFINITIONS.filter(({ metricKey }) => metricKey !== 'active_contributors' || hasOwn(project.metrics, 'active_contributors'));
-  return `<div class="metric-charts">${definitions.map(({ label, key, metricKey, unit }) => {
+  return `<div class="metric-charts metric-count-${definitions.length}">${definitions.map(({ label, key, metricKey, unit }) => {
     const series = project.series[key];
     const baseline = project.seriesBaselines[key]?.[0] ?? null;
     const current = metricValue(project.metrics, metricKey, lastValue(series));
-    return `<div class="metric-chart-tile">${chartCaption(label, current, baseline, unit)}${sparkChart(series, { color, baseline, width: 260, height: 64, suffix: unit })}</div>`;
+    const labels = weekLabels(project).slice(0, series.length);
+    return `<article class="metric-chart-tile">${chartCaption(label, current, baseline, unit)}<div class="metric-chart-body"><div class="chart-plot-row">${chartYAxis(series, baseline, unit, label)}${sparkChart(series, { color, baseline, width: 520, height: 154, suffix: unit, labels, grid: true })}</div><div class="chart-axis-row"><span class="chart-axis-gutter" aria-hidden="true"></span>${chartTimestampAxis(labels)}</div></div></article>`;
   }).join('')}</div>`;
 }
 
@@ -522,22 +537,18 @@ function aggregateMetricsSection(project) {
   return `<section class="panel code-insights"><div class="panel-header"><div><h2 class="panel-title">Project aggregates</h2><p class="panel-subtitle">Repository-level signals only; individual-level data is never shown.</p></div><span class="eyebrow">${escapeHtml(snapshotMetaFor(project).ruleSetVersion || 'Current rules')}</span></div><div class="aggregate-metrics">${definitions.map(([label, key, unit]) => `<div class="aggregate-metric"><span class="chart-caption-label">${escapeHtml(label)}</span><strong>${project.metrics[key] === undefined ? '—' : `${escapeHtml(project.metrics[key])}${escapeHtml(unit)}`}</strong></div>`).join('')}</div></section>`;
 }
 
-function evidenceSourcesMarkup(item) {
-  return `<div class="evidence-note">Source evidence: ${item.sources.map((source) => `<span>${escapeHtml(source)}</span>`).join(', ')}</div>`;
-}
-
 function evidenceRow(project, item, size = '') {
   const metricDefinition = METRIC_DEFINITIONS.find(({ key, metricKey }) => key === item.metric || metricKey === item.metric);
   const metricKey = metricDefinition?.key || item.metric;
   const series = metricKey && project.series[metricKey] ? project.series[metricKey] : [];
   const metricName = metricDefinition?.metricKey;
-  const baseline = metricDefinition ? project.seriesBaselines[metricDefinition.key]?.[0] ?? null : finiteNumber(item.baseline);
-  const current = metricDefinition ? metricValue(project.metrics, metricName, lastValue(series)) : finiteNumber(item.current);
+  const baseline = finiteNumber(item.baseline) ?? (metricDefinition ? project.seriesBaselines[metricDefinition.key]?.[0] ?? null : null);
+  const current = finiteNumber(item.current) ?? (metricDefinition ? metricValue(project.metrics, metricName, lastValue(series)) : null);
   const detail = [item.window ? `Window ${item.window}` : '', item.threshold ? `Trigger ${item.threshold}` : ''].filter(Boolean).join(' · ');
   if (metricDefinition && series.some((value) => value !== null)) {
-    return `<div class="evidence-item ${size}"><span class="evidence-marker ${escapeHtml(item.type)}">${icon(item.icon)}</span><div class="evidence-copy"><div class="evidence-top"><strong>${escapeHtml(item.title)}</strong>${chartCaption('', current, baseline, metricDefinition.unit)}</div>${sparkChart(series, { color: statusColor(project.statusClass), baseline, width: size === 'lg' ? 420 : 220, height: size === 'lg' ? 56 : 36, suffix: metricDefinition.unit, area: size === 'lg' })}${detail ? `<div class="evidence-note">${escapeHtml(detail)}</div>` : ''}${evidenceSourcesMarkup(item)}</div></div>`;
+    return `<div class="evidence-item ${size}"><span class="evidence-marker ${escapeHtml(item.type)}">${icon(item.icon)}</span><div class="evidence-copy"><div class="evidence-top"><strong>${escapeHtml(item.title)}</strong>${chartCaption('', current, baseline, metricDefinition.unit)}</div>${sparkChart(series, { color: statusColor(project.statusClass), baseline, width: size === 'lg' ? 420 : 220, height: size === 'lg' ? 56 : 36, suffix: metricDefinition.unit, labels: weekLabels(project), area: size === 'lg' })}${detail ? `<div class="evidence-note">${escapeHtml(detail)}</div>` : ''}</div></div>`;
   }
-  return `<div class="evidence-item ${size}"><span class="evidence-marker ${escapeHtml(item.type)}">${icon(item.icon)}</span><div class="evidence-copy"><div class="evidence-top"><strong>${escapeHtml(item.title)}</strong><span class="chart-caption-value">${current === null ? '—' : escapeHtml(current)}</span></div>${detail ? `<div class="evidence-note">${escapeHtml(detail)}</div>` : ''}${evidenceSourcesMarkup(item)}</div></div>`;
+  return `<div class="evidence-item ${size}"><span class="evidence-marker ${escapeHtml(item.type)}">${icon(item.icon)}</span><div class="evidence-copy"><div class="evidence-top"><strong>${escapeHtml(item.title)}</strong>${metricDefinition ? chartCaption('', current, baseline, metricDefinition.unit) : `<span class="chart-caption-value">${current === null ? '—' : escapeHtml(current)}</span>`}</div>${detail ? `<div class="evidence-note">${escapeHtml(detail)}</div>` : ''}</div></div>`;
 }
 
 function evidenceList(project, size = '') {
@@ -561,94 +572,54 @@ function historyCard(project) {
 
 function renderOverview() {
   const projects = state.projects;
-  const attention = projects.filter((project) => (project.statusClass === 'risk' || project.statusClass === 'watch') && project.evidence.length);
+  const attention = projects.filter(isAttentionProject);
   const clear = projects.filter((project) => project.statusClass === 'clear');
   const insufficient = projects.filter((project) => project.statusClass === 'data');
-  const active = projects.filter((project) => project.statusClass !== 'pause');
+  const active = projects.filter(isActiveProject);
+  const signalMetricAliases = {
+    openPRs: ['openPRs', 'open_prs', 'oldest_open_pr_days'],
+    activity: ['activity', 'active_days', 'days_since_activity'],
+    contributors: ['contributors', 'active_contributors'],
+  };
   const signalCounts = ['openPRs', 'activity', 'contributors'].map((metric, index) => ({
     metric,
-    count: projects.filter((project) => project.evidence.some((item) => item.metric === metric || (metric === 'openPRs' && item.metric === 'open_prs') || (metric === 'contributors' && item.metric === 'active_contributors'))).length,
+    count: projects.filter((project) => project.evidence.some((item) => signalMetricAliases[metric].includes(item.metric))).length,
     icon: ['pull', 'activity', 'users'][index],
     title: ['Pull request aging', 'Activity trend', 'Contributor resilience'][index],
     copy: ['Review or decision bottlenecks', 'Below project baseline', 'Aggregate count only'][index],
   }));
-  return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning, Jordan</h1><p>Here’s the current read on the projects that matter this week.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div><button class="primary-button" id="review-button">Start weekly review <span>→</span></button></div></div>
-    <div class="stat-grid"><article class="stat-card total"><div class="stat-label"><span>Active projects</span><span class="stat-icon">${icon('folder')}</span></div><div class="stat-value">${active.length}</div><div class="stat-foot">Current snapshot</div></article><article class="stat-card attention"><div class="stat-label"><span>Need attention</span><span class="stat-icon">${icon('triangle')}</span></div><div class="stat-value">${attention.length}</div><div class="stat-foot">Warnings with evidence</div></article><article class="stat-card clear"><div class="stat-label"><span>Clear</span><span class="stat-icon">${icon('check-circle')}</span></div><div class="stat-value">${clear.length}</div><div class="stat-foot">Explicit server status only</div></article><article class="stat-card data"><div class="stat-label"><span>Insufficient data</span><span class="stat-icon">${icon('database')}</span></div><div class="stat-value">${insufficient.length}</div><div class="stat-foot">Signals remain suppressed</div></article></div>
+  return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning, Jordan</h1><p>Here’s the current read on the projects that matter this week.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div></div></div>
+    <div class="stat-grid"><button class="stat-card total dashboard-filter" data-dashboard-filter="Active projects" type="button"><span class="stat-label"><span>Active projects</span><span class="stat-icon">${icon('folder')}</span></span><span class="stat-value">${active.length}</span><span class="stat-foot">Current snapshot</span></button><button class="stat-card attention dashboard-filter" data-dashboard-filter="Needs attention" type="button"><span class="stat-label"><span>Need attention</span><span class="stat-icon">${icon('triangle')}</span></span><span class="stat-value">${attention.length}</span><span class="stat-foot">Warnings with evidence</span></button><button class="stat-card clear dashboard-filter" data-dashboard-filter="Clear" type="button"><span class="stat-label"><span>Clear</span><span class="stat-icon">${icon('check-circle')}</span></span><span class="stat-value">${clear.length}</span><span class="stat-foot">Explicit server status only</span></button><button class="stat-card data dashboard-filter" data-dashboard-filter="Insufficient data" type="button"><span class="stat-label"><span>Insufficient data</span><span class="stat-icon">${icon('database')}</span></span><span class="stat-value">${insufficient.length}</span><span class="stat-foot">Signals remain suppressed</span></button></div>
     <div class="insight-banner"><div class="insight-banner-icon">${icon(attention.length ? 'sparkle' : 'database')}</div><div class="insight-copy"><strong>${attention.length ? `${attention.length} projects may need leadership attention this week.` : 'No inspectable warnings are in the current queue.'}</strong><span>${attention.length ? 'Review the evidence, add context, and decide what to verify with each team.' : 'Insufficient data and planned pauses stay out of the attention queue.'}</span></div><button class="insight-link" id="banner-review">Review attention queue →</button></div>
-    <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-header"><div><h2 class="panel-title">Attention queue</h2><p class="panel-subtitle">Only server-issued warnings with evidence references appear here.</p></div><button class="panel-link" id="queue-filter">View all projects</button></div><div class="queue-list">${attention.length ? attention.map((project) => `<div class="queue-item">${monogram(project)}${signalStrip(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`).join('') : '<div class="history-empty" style="padding:20px;">No projects require attention from this snapshot.</div>'}</div></section><div><section class="panel pulse-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio pulse</h2><p class="panel-subtitle">Historical queue series is shown only when returned by the API.</p></div><span class="eyebrow">Snapshot</span></div><div class="pulse-chart"><div class="chart-empty" style="width:100%;height:128px;">Historical queue data unavailable</div></div><div class="pulse-footer"><div class="chart-legend"><span class="legend-line"></span> Evidence-backed status</div><span class="chart-note">No inferred history</span></div></section><section class="panel signal-panel"><div class="panel-header"><div><h2 class="panel-title">Signal mix</h2><p class="panel-subtitle">What is driving this week’s queue</p></div></div><div class="signal-list">${signalCounts.map((signal) => `<div class="signal-row"><span class="signal-icon ${signal.metric === 'openPRs' ? 'red' : signal.metric === 'activity' ? 'amber' : 'blue'}">${icon(signal.icon)}</span><div class="signal-copy"><strong>${signal.title}</strong><span>${signal.copy}</span></div><span class="signal-count">${signal.count}</span></div>`).join('')}</div></section><div class="review-card"><div class="review-card-icon">${icon('clipboard')}</div><div class="review-copy"><strong>Weekly review ritual</strong><span>Pull-only review log backed by the audit endpoint.</span></div><button class="panel-link" id="review-log-button">Open log</button></div></div></div>`;
+    <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-header"><div><h2 class="panel-title">Attention queue</h2><p class="panel-subtitle">Only server-issued warnings with evidence references appear here.</p></div><button class="panel-link" id="queue-filter">View all projects</button></div><div class="queue-list">${attention.length ? attention.map((project) => `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`).join('') : '<div class="history-empty" style="padding:20px;">No projects require attention from this snapshot.</div>'}</div></section><div><section class="panel pulse-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio pulse</h2><p class="panel-subtitle">Historical queue series is shown only when returned by the API.</p></div><span class="eyebrow">Snapshot</span></div><div class="pulse-chart"><div class="chart-empty" style="width:100%;height:128px;">Historical queue data unavailable</div></div><div class="pulse-footer"><div class="chart-legend"><span class="legend-line"></span> Evidence-backed status</div><span class="chart-note">No inferred history</span></div></section><section class="panel signal-panel"><div class="panel-header"><div><h2 class="panel-title">Signal mix</h2><p class="panel-subtitle">What is driving this week’s queue</p></div></div><div class="signal-list">${signalCounts.map((signal) => `<div class="signal-row"><span class="signal-icon ${signal.metric === 'openPRs' ? 'red' : signal.metric === 'activity' ? 'amber' : 'blue'}">${icon(signal.icon)}</span><div class="signal-copy"><strong>${signal.title}</strong><span>${signal.copy}</span></div><span class="signal-count">${signal.count}</span></div>`).join('')}</div></section></div></div>`;
 }
 
 function renderProjects() {
-  const filters = ['All projects', 'At risk', 'Watch', 'Clear', 'Insufficient data', 'Planned pause'];
-  const filtered = currentFilter === 'All projects' ? state.projects : state.projects.filter((project) => project.status === currentFilter);
-  return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1><p>Every project boundary, current attention status, and data freshness in one place.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"></div></div><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Trace</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => `<tr class="project-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td><td>${statusPill(project)}</td><td>${signalStrip(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`).join('') : '<tr><td colspan="6"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Boundaries are versioned and reviewed by the API.</span><button class="panel-link" id="boundary-link">View boundaries →</button></div></section>`;
+  const filters = ['All projects', 'Active projects', 'Needs attention', 'At risk', 'Watch', 'Clear', 'Insufficient data', 'Planned pause'];
+  const filtered = currentFilter === 'All projects'
+    ? state.projects
+    : currentFilter === 'Active projects'
+      ? state.projects.filter(isActiveProject)
+      : currentFilter === 'Needs attention'
+        ? state.projects.filter(isAttentionProject)
+        : state.projects.filter((project) => project.status === currentFilter);
+  return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1><p>Every project boundary, current attention status, and data freshness in one place.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"></div></div><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => `<tr class="project-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td><td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
+}
+
+function insightsProjectCell(project) {
+  return `<div class="insights-project-cell">${monogram(project, 'sm')}<div class="insights-project-copy"><div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)}</span></div>${statusPill(project)}</div></div>`;
 }
 
 function renderInsights() {
   const showContributorColumn = state.projects.some((project) => hasOwn(project.metrics, 'active_contributors'));
   const contributorHeader = showContributorColumn ? '<th>Active contributors <span>aggregate only</span></th>' : '';
   const contributorCell = (project) => showContributorColumn ? `<td>${hasOwn(project.metrics, 'active_contributors') ? chartCaption('', project.metrics.active_contributors, project.seriesBaselines.contributors?.[0]) : '<div class="chart-caption"><span class="chart-caption-label"></span><span class="chart-caption-value">—</span></div>'}</td>` : '';
-  return `<div class="page-heading"><div><span class="eyebrow">Combined view · last 8 weeks</span><h1>Insights</h1><p>Aggregate activity, review flow, and contributor counts where the server aggregation floor permits.</p>${snapshotMetaMarkup()}</div></div><section class="panel"><div class="table-scroll"><table class="insights-table"><thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th>${contributorHeader}</tr></thead><tbody>${state.projects.length ? state.projects.map((project) => `<tr class="insights-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)}</span></div></div>${statusPill(project)}</td><td>${chartCaption('', metricValue(project.metrics, 'active_days', lastValue(project.series.activity)), project.seriesBaselines.activity?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'open_prs', lastValue(project.series.openPRs)), project.seriesBaselines.openPRs?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'review_latency_days', lastValue(project.series.reviewLatency)), project.seriesBaselines.reviewLatency?.[0], 'd')}</td>${contributorCell(project)}</tr>`).join('') : `<tr><td colspan="${showContributorColumn ? 5 : 4}"><div class="history-empty">No project metrics returned.</div></td></tr>`}</tbody></table></div></section>`;
+  return `<div class="page-heading"><div><span class="eyebrow">Combined view · last 8 weeks</span><h1>Insights</h1><p>Aggregate activity, review flow, and contributor counts where the server aggregation floor permits.</p>${snapshotMetaMarkup()}</div></div><section class="panel"><div class="table-scroll"><table class="insights-table"><thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th>${contributorHeader}</tr></thead><tbody>${state.projects.length ? state.projects.map((project) => `<tr class="insights-row" data-project-id="${escapeHtml(project.id)}"><td>${insightsProjectCell(project)}</td><td>${chartCaption('', metricValue(project.metrics, 'active_days', lastValue(project.series.activity)), project.seriesBaselines.activity?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'open_prs', lastValue(project.series.openPRs)), project.seriesBaselines.openPRs?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'review_latency_days', lastValue(project.series.reviewLatency)), project.seriesBaselines.reviewLatency?.[0], 'd')}</td>${contributorCell(project)}</tr>`).join('') : `<tr><td colspan="${showContributorColumn ? 5 : 4}"><div class="history-empty">No project metrics returned.</div></td></tr>`}</tbody></table></div></section>`;
 }
 
 function renderProjectProfile(project) {
   const meta = statusMeta[project.statusClass] || statusMeta.data;
-  return `<div class="page-heading"><div><button class="text-button back-link" id="profile-back"><span>←</span> Back to inventory</button><div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p>${snapshotMetaMarkup(project, true)}</div>${statusPill(project)}</div></div><div class="heading-actions">${signalStrip(project, 'lg')}</div></div><div class="detail-status wide ${escapeHtml(project.statusClass)}"><strong>${escapeHtml(project.status)}</strong><span>${escapeHtml(meta.copy)}</span></div>${metricCharts(project)}${aggregateMetricsSection(project)}<div class="profile-grid"><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Warnings require inspectable source evidence.</p></div><span class="eyebrow">${escapeHtml(formatPercent(project.dataCompletenessPct))} complete</span></div><div class="evidence-section wide">${evidenceList(project, 'lg')}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${escapeHtml(meta.cta)} <span>→</span></button></div></section><div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div></div>`;
-}
-
-function normalizeAudit(raw) {
-  const envelope = raw && raw.data && typeof raw.data === 'object' ? raw.data : raw;
-  const items = asArray(envelope?.items || envelope?.entries || envelope?.events || envelope?.audit || envelope?.audit_log || envelope);
-  return items.map((item) => {
-    if (!item || typeof item !== 'object') return null;
-    const targetId = firstDefined(item.target_id, item.targetId, item.project_id, item.projectId, null);
-    return { action: firstDefined(item.action, item.event, 'Audit event'), targetType: firstDefined(item.target_type, item.targetType, ''), targetId, at: firstDefined(item.at, item.created_at, item.timestamp, '—'), category: firstDefined(item.category, item.after?.category, null), note: firstDefined(item.note, item.after?.note, null) };
-  }).filter(Boolean);
-}
-
-function normalizeRules(raw) {
-  const envelope = raw && raw.data && typeof raw.data === 'object' ? raw.data : raw;
-  const items = asArray(envelope?.rules || envelope?.items || envelope);
-  return items.map((item) => {
-    if (!item || typeof item !== 'object') return null;
-    return { id: firstDefined(item.id, item.rule_id, 'Rule'), name: firstDefined(item.name, item.signal_name, item.signal, 'Signal rule'), severity: firstDefined(item.severity, '—'), threshold: firstDefined(item.threshold, item.trigger_threshold, '—'), window: firstDefined(item.window, item.time_window, '—'), version: firstDefined(item.rule_set_version, item.version, state.snapshot?.ruleSetVersion, '—'), status: firstDefined(item.status, 'Active') };
-  }).filter(Boolean);
-}
-
-function renderUtilityView(view) {
-  const content = {
-    'review-log': { icon: 'clipboard', title: 'Review log', copy: 'A pull-only record of feedback and audit events for the portfolio.' },
-    boundaries: { icon: 'waypoints', title: 'Project boundaries', copy: 'Versioned ownership records with effective dates; historical snapshots remain tied to their original boundary.' },
-    rules: { icon: 'sliders', title: 'Signal rules', copy: 'Read-only rule definitions, thresholds, evidence requirements, and versions used to create immutable snapshots.' },
-  }[view];
-  let body = '';
-  if (view === 'review-log') {
-    if (state.auditLoading) body = loadingPanel('Loading audit events…');
-    else if (state.auditError) body = errorPanel(state.auditError, 'retry-audit');
-    else if (!state.audit?.length) body = `<div class="empty-view"><div class="empty-view-inner"><div class="empty-view-icon">${icon('clipboard')}</div><h2>No audit events returned</h2><p>The API returned no review events for the current access scope.</p></div></div>`;
-    else body = `<div class="audit-list">${state.audit.map((entry) => `<div class="audit-row"><div class="audit-icon">${icon(entry.action.toLowerCase().includes('feedback') ? 'message' : 'clipboard')}</div><div class="audit-copy"><strong>${escapeHtml(entry.action)}</strong><span>${escapeHtml(entry.targetType || 'record')}${entry.targetId ? ` · ${escapeHtml(projectName(entry.targetId))}` : ''}</span>${entry.note ? `<p>${escapeHtml(entry.note)}</p>` : ''}${entry.category ? `<em>${escapeHtml(entry.category)}</em>` : ''}</div><time>${escapeHtml(formatDate(entry.at, true))}</time></div>`).join('')}</div>`;
-  }
-  if (view === 'boundaries') {
-    if (state.boundariesLoading) body = loadingPanel('Loading versioned boundaries…');
-    else if (state.boundariesError) body = errorPanel(state.boundariesError, 'retry-boundaries');
-    else body = `<div class="boundary-grid">${state.projects.map((project) => { const item = state.boundaries?.[project.id]; return `<article class="boundary-entry"><div class="boundary-entry-top">${monogram(project, 'sm')}<div><h3>${escapeHtml(project.name)}</h3><p>${escapeHtml(project.team)}</p></div>${item?.boundary ? `<span class="status-pill status-${project.statusClass}">${escapeHtml(item.boundary.lifecycle)}</span>` : ''}</div>${item?.loading ? '<div class="history-empty">Loading boundary…</div>' : item?.error ? `<div class="boundary-error">${escapeHtml(item.error)}</div>` : item?.boundary ? boundaryDetails(item.boundary) : '<div class="history-empty">No boundary record returned.</div>'}</article>`; }).join('')}</div>`;
-  }
-  if (view === 'rules') {
-    if (state.rulesLoading) body = loadingPanel('Loading signal rules…');
-    else if (state.rulesError) body = errorPanel(state.rulesError, 'retry-rules');
-    else if (!state.rules?.length) body = `<div class="empty-view"><div class="empty-view-inner"><div class="empty-view-icon">${icon('sliders')}</div><h2>No rules returned</h2><p>There is no rule definition available for the current access scope.</p></div></div>`;
-    else body = `<div class="rules-list">${state.rules.map((rule) => `<article class="rule-row"><div class="rule-icon">${icon('sliders')}</div><div class="rule-copy"><div class="rule-title"><strong>${escapeHtml(rule.name)}</strong><span class="status-pill status-clear">${escapeHtml(rule.status)}</span></div><p><span>Threshold</span>${escapeHtml(rule.threshold)} · <span>Window</span>${escapeHtml(rule.window)} · <span>Severity</span>${escapeHtml(rule.severity)}</p></div><span class="rule-version">${escapeHtml(rule.version)}</span></article>`).join('')}</div>`;
-  }
-  return `<div class="page-heading"><div><span class="eyebrow">Connected data</span><h1>${content.title}</h1><p>${content.copy}</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><button class="secondary-button" id="back-overview">← Back to overview</button></div></div><section class="panel utility-panel">${body}</section>`;
-}
-
-function boundaryDetails(boundary) {
-  const effective = boundary.effectiveUntil ? `${boundary.effectiveSince} – ${boundary.effectiveUntil}` : boundary.effectiveSince;
-  return `<dl class="boundary-list"><div><dt>Root team</dt><dd>${escapeHtml(boundary.rootTeam)}</dd></div><div><dt>Subteams</dt><dd>${escapeHtml(boundary.subteams.length ? boundary.subteams.join(', ') : '—')}</dd></div><div><dt>Repositories</dt><dd>${escapeHtml(boundary.repos.length ? boundary.repos.join(', ') : '—')}</dd></div><div><dt>Data owner</dt><dd>${escapeHtml(boundary.dataOwner)}</dd></div><div><dt>Effective dates</dt><dd>${escapeHtml(effective)}</dd></div></dl>`;
-}
-
-function projectName(id) {
-  return state.projects.find((project) => project.id === id)?.name || id;
+  return `<div class="page-heading"><div><button class="text-button back-link" id="profile-back"><span>←</span> Back to inventory</button><div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p>${snapshotMetaMarkup(project, true)}</div>${statusPill(project)}</div></div></div><div class="detail-status wide ${escapeHtml(project.statusClass)}"><strong>${escapeHtml(project.status)}</strong><span>${escapeHtml(meta.copy)}</span></div>${metricCharts(project)}${aggregateMetricsSection(project)}<div class="profile-grid"><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Warnings require inspectable source evidence.</p></div><span class="eyebrow">${escapeHtml(formatPercent(project.dataCompletenessPct))} complete</span></div><div class="evidence-section wide">${evidenceList(project, 'lg')}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${escapeHtml(meta.cta)} <span>→</span></button></div></section><div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div></div>`;
 }
 
 function loadingPanel(message) {
@@ -677,7 +648,7 @@ function render() {
   else if (currentView === 'profile') {
     const project = selectedProject();
     appView.innerHTML = !project ? errorPanel('This project is outside the current access scope.') : state.profileLoading ? loadingPanel('Loading project snapshots…') : state.profileError ? errorPanel(state.profileError, 'retry-profile') : renderProjectProfile(project);
-  } else if (currentView === 'review-log' || currentView === 'boundaries' || currentView === 'rules') appView.innerHTML = renderUtilityView(currentView);
+  }
   document.getElementById('breadcrumb-current').textContent = currentView === 'profile' ? (selectedProject()?.name || 'Project') : viewLabels[currentView];
   const navActiveView = currentView === 'profile' ? 'projects' : currentView;
   document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.view === navActiveView));
@@ -691,13 +662,6 @@ function selectedProject() {
 }
 
 function updateChrome() {
-  const meta = snapshotMetaFor();
-  const percent = document.querySelector('.coverage-percent');
-  const bar = document.querySelector('.coverage-bar span');
-  const copy = document.querySelector('.coverage-card p');
-  if (percent) percent.textContent = formatPercent(meta.dataCompletenessPct);
-  if (bar) bar.style.width = `${Math.max(0, Math.min(100, finiteNumber(meta.dataCompletenessPct) || 0))}%`;
-  if (copy) copy.textContent = meta.lastSyncAt ? `Last sync ${formatDate(meta.lastSyncAt, true)}` : 'Last sync unavailable';
   const count = document.querySelector('.nav-count');
   if (count) count.textContent = String(state.projects.filter((project) => project.statusClass === 'risk' || project.statusClass === 'watch').length);
 }
@@ -775,66 +739,9 @@ async function loadProjectSnapshots(projectId) {
   }
 }
 
-async function loadAudit() {
-  if (state.auditLoading) return;
-  state.auditLoading = true;
-  state.auditError = null;
-  render();
-  try {
-    state.audit = normalizeAudit(await requestJson('/audit'));
-  } catch (error) {
-    state.auditError = error.message || 'Audit events could not be loaded.';
-  } finally {
-    state.auditLoading = false;
-    render();
-  }
-}
-
-async function loadBoundaries() {
-  if (state.boundariesLoading) return;
-  state.boundariesLoading = true;
-  state.boundariesError = null;
-  state.boundaries = Object.fromEntries(state.projects.map((project) => [project.id, { loading: true }]));
-  render();
-  try {
-    await Promise.all(state.projects.map(async (project) => {
-      try {
-        const raw = await requestJson(`/projects/${encodeURIComponent(project.id)}/boundary`);
-        const envelope = raw?.boundary || raw?.data?.boundary || raw?.data || raw;
-        state.boundaries[project.id] = { boundary: normalizeBoundary(envelope) };
-      } catch (error) {
-        state.boundaries[project.id] = { error: error.message || 'Boundary could not be loaded.' };
-      }
-    }));
-  } catch (error) {
-    state.boundariesError = error.message || 'Boundaries could not be loaded.';
-  } finally {
-    state.boundariesLoading = false;
-    render();
-  }
-}
-
-async function loadRules() {
-  if (state.rulesLoading) return;
-  state.rulesLoading = true;
-  state.rulesError = null;
-  render();
-  try {
-    state.rules = normalizeRules(await requestJson('/rules'));
-  } catch (error) {
-    state.rulesError = error.message || 'Rules could not be loaded.';
-  } finally {
-    state.rulesLoading = false;
-    render();
-  }
-}
-
 function navigate(view) {
   currentView = view;
   render();
-  if (view === 'review-log' && !state.audit && !state.auditLoading) loadAudit();
-  if (view === 'boundaries' && !state.boundaries && !state.boundariesLoading) loadBoundaries();
-  if (view === 'rules' && !state.rules && !state.rulesLoading) loadRules();
 }
 
 function openFeedback(project = selectedProject(), warningId = null) {
@@ -871,7 +778,6 @@ async function saveFeedback() {
   try {
     await requestJson('/feedback', { method: 'POST', body: JSON.stringify(payload) });
     closeFeedback();
-    state.audit = null;
     showToast('Review context recorded');
     // The note is stored server-side; refetch so the review history reflects it.
     await loadProjectSnapshots(project.id);
@@ -899,20 +805,17 @@ function bindViewEvents() {
     loadProjectSnapshots(selectedProjectId);
   }));
   document.getElementById('profile-back')?.addEventListener('click', () => navigate('projects'));
+  document.querySelectorAll('[data-dashboard-filter]').forEach((button) => button.addEventListener('click', () => {
+    currentFilter = button.dataset.dashboardFilter;
+    navigate('projects');
+  }));
   document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); currentFilter = button.dataset.filter; render(); }));
-  document.querySelectorAll('#review-button, #banner-review').forEach((button) => button.addEventListener('click', () => { currentFilter = 'All projects'; navigate('projects'); }));
+  document.getElementById('banner-review')?.addEventListener('click', () => { currentFilter = 'All projects'; navigate('projects'); });
   document.getElementById('queue-filter')?.addEventListener('click', () => { currentFilter = 'All projects'; navigate('projects'); });
-  document.getElementById('review-log-button')?.addEventListener('click', () => navigate('review-log'));
-  document.getElementById('back-overview')?.addEventListener('click', () => navigate('overview'));
-  document.getElementById('boundary-link')?.addEventListener('click', () => navigate('boundaries'));
-  document.getElementById('coverage-details')?.addEventListener('click', () => navigate('boundaries'));
   document.getElementById('add-context')?.addEventListener('click', () => openFeedback());
   document.getElementById('confirm-review')?.addEventListener('click', () => openFeedback());
   document.getElementById('retry-latest')?.addEventListener('click', loadLatestSnapshot);
   document.getElementById('retry-profile')?.addEventListener('click', () => loadProjectSnapshots(selectedProjectId));
-  document.getElementById('retry-audit')?.addEventListener('click', loadAudit);
-  document.getElementById('retry-boundaries')?.addEventListener('click', loadBoundaries);
-  document.getElementById('retry-rules')?.addEventListener('click', loadRules);
 }
 
 document.querySelectorAll('.nav-item').forEach((item) => item.addEventListener('click', () => navigate(item.dataset.view)));
@@ -935,7 +838,4 @@ if (location.hash) {
 loadLatestSnapshot().then(() => {
   if (state.error) return;
   if (currentView === 'profile' && selectedProjectId) loadProjectSnapshots(selectedProjectId);
-  if (currentView === 'review-log') loadAudit();
-  if (currentView === 'boundaries') loadBoundaries();
-  if (currentView === 'rules') loadRules();
 });

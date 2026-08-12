@@ -38,6 +38,8 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover - local checkout
 
 
 AUTHENTIK_TEAMS_COLLECTION = "authentik_teams"
+PEOPLE_PORTAL_TEAMS_COLLECTION = "people_portal_teams"
+PEOPLE_PORTAL_PROJECTS_COLLECTION = "people_portal_projects"
 GITEA_REPOS_COLLECTION = "gitea_repos"
 REPO_ACTIVITY_COLLECTION = "repo_activity"
 REPO_ACTIVITY_EVIDENCE_COLLECTION = "repo_activity_evidence"
@@ -416,7 +418,12 @@ def _authentik_id(value: Any) -> str | None:
     return str(value)
 
 
-def _team_document(team: Mapping[str, Any], *, aggregation_floor: int) -> dict[str, Any]:
+def _team_document(
+    team: Mapping[str, Any],
+    *,
+    aggregation_floor: int,
+    source_system: str = "authentik",
+) -> dict[str, Any]:
     team_id = _authentik_id(team.get("pk", team.get("id", team.get("slug"))))
     if team_id is None:
         raise ValueError("Authentik team has no stable id")
@@ -424,7 +431,7 @@ def _team_document(team: Mapping[str, Any], *, aggregation_floor: int) -> dict[s
     children = team.get("children", team.get("child_teams", []))
     child_ids = []
     if isinstance(children, Sequence) and not isinstance(children, (str, bytes)):
-        child_ids = [child_id for child in (_authentik_id(item) for item in children) if child_id]
+        child_ids = [child_id for child_id in (_authentik_id(item) for item in children) if child_id]
 
     member_count = _number(team.get("member_count"))
     if member_count is None:
@@ -441,7 +448,7 @@ def _team_document(team: Mapping[str, Any], *, aggregation_floor: int) -> dict[s
         "parent_team_id": parent_id,
         "child_team_ids": child_ids,
         "synced_at": _iso(_utc_now()),
-        "source": "authentik",
+        "source": source_system,
         "aggregation_eligible": bool(member_count is not None and member_count >= aggregation_floor),
     }
     # The count is useful to the downstream floor check only when the team is
@@ -468,6 +475,7 @@ class AuthentikTeamHierarchyAdapter(_HttpxAdapter):
         page_size: int = DEFAULT_PAGE_SIZE,
         max_pages: int = DEFAULT_MAX_PAGES,
         timeout: float = 30.0,
+        source_system: str = "authentik",
     ) -> None:
         super().__init__(
             base_url=base_url,
@@ -482,6 +490,7 @@ class AuthentikTeamHierarchyAdapter(_HttpxAdapter):
         self.aggregation_floor = max(1, int(aggregation_floor))
         self.page_size = page_size
         self.max_pages = max_pages
+        self.source_system = source_system
 
     @classmethod
     def from_env(cls, db: DatabaseLike | Mapping[str, Any], **kwargs: Any) -> "AuthentikTeamHierarchyAdapter":
@@ -529,7 +538,11 @@ class AuthentikTeamHierarchyAdapter(_HttpxAdapter):
 
         for team in teams:
             try:
-                document = _team_document(team, aggregation_floor=self.aggregation_floor)
+                document = _team_document(
+                    team,
+                    aggregation_floor=self.aggregation_floor,
+                    source_system=self.source_system,
+                )
                 document["sync_cycle_id"] = cycle_id
                 document["synced_at"] = captured_at
                 _insert(self.db, self.collection_name, document)
@@ -544,6 +557,108 @@ class AuthentikTeamHierarchyAdapter(_HttpxAdapter):
             synced_at=captured_at or "",
             records_written=counts.records_written,
             data_quality_flags=tuple(counts.flags),
+        )
+
+
+class PeoplePortalDirectoryAdapter(AuthentikTeamHierarchyAdapter):
+    """Pull aggregate team sizes and project boundaries from People Portal."""
+
+    def __init__(
+        self,
+        db: DatabaseLike | Mapping[str, Any],
+        *,
+        base_url: str | None = None,
+        token: str | None = None,
+        client: Any = None,
+        client_factory: Callable[..., Any] | None = None,
+        teams_endpoint: str = "/api/project-health/teams",
+        projects_endpoint: str = "/api/project-health/projects",
+        aggregation_floor: int = DEFAULT_AGGREGATION_FLOOR,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        timeout: float = 30.0,
+    ) -> None:
+        super().__init__(
+            db,
+            base_url=base_url,
+            token=token,
+            client=client,
+            client_factory=client_factory,
+            endpoint=teams_endpoint,
+            collection_name=PEOPLE_PORTAL_TEAMS_COLLECTION,
+            aggregation_floor=aggregation_floor,
+            page_size=page_size,
+            max_pages=max_pages,
+            timeout=timeout,
+            source_system="people_portal",
+        )
+        self.projects_endpoint = projects_endpoint
+
+    def sync(
+        self,
+        *,
+        sync_cycle_id: str | None = None,
+        synced_at: datetime | str | None = None,
+    ) -> SyncResult:
+        cycle_id = sync_cycle_id or _new_id("sync")
+        captured_at = _iso(synced_at or _utc_now()) or _iso(_utc_now()) or ""
+        team_result = super().sync(sync_cycle_id=cycle_id, synced_at=captured_at)
+        if team_result.status == "not_configured":
+            return team_result
+
+        flags = list(team_result.data_quality_flags)
+        project_count = 0
+        try:
+            projects = self.pages(
+                self.projects_endpoint,
+                page_size=self.page_size,
+                max_pages=self.max_pages,
+            )
+        except Exception:
+            projects = []
+            flags.append("people_portal_project_fetch_failed")
+
+        for project in projects:
+            project_id = project.get("projectId", project.get("project_id"))
+            display_name = project.get("displayName", project.get("display_name"))
+            root_team_id = project.get("rootTeamId", project.get("root_team_id"))
+            effective_from = project.get("effectiveFrom", project.get("effective_from"))
+            repositories = project.get("repositories", [])
+            if not project_id or not display_name or not root_team_id or not effective_from or not isinstance(repositories, Sequence):
+                flags.append("people_portal_project_record_invalid")
+                continue
+            safe_repositories = []
+            for repo in repositories:
+                if not isinstance(repo, Mapping):
+                    continue
+                repo_id = repo.get("giteaRepoId", repo.get("gitea_repo_id"))
+                slug = repo.get("repoSlug", repo.get("repo_slug"))
+                if repo_id and slug:
+                    safe_repositories.append({"gitea_repo_id": str(repo_id), "repo_slug": str(slug)})
+            row = {
+                "_id": _new_id("people_portal_project"),
+                "sync_cycle_id": cycle_id,
+                "synced_at": captured_at,
+                "source": "people_portal",
+                "project_id": str(project_id),
+                "display_name": str(display_name),
+                "lifecycle_state": str(project.get("lifecycleState", project.get("lifecycle_state", "new"))),
+                "root_team_id": str(root_team_id),
+                "included_subteam_ids": [str(item) for item in project.get("includedSubteamIds", project.get("included_subteam_ids", []))],
+                "repositories": safe_repositories,
+                "effective_from": str(effective_from),
+                "data_owner_user_id": project.get("dataOwnerUserId", project.get("data_owner_user_id")),
+            }
+            _insert(self.db, PEOPLE_PORTAL_PROJECTS_COLLECTION, row)
+            project_count += 1
+
+        status = "ok" if not flags else "partial"
+        return SyncResult(
+            status=status,
+            sync_cycle_id=cycle_id,
+            synced_at=captured_at,
+            records_written=team_result.records_written + project_count,
+            data_quality_flags=tuple(sorted(set(flags))),
         )
 
 
@@ -1076,13 +1191,18 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
             if review_failed:
                 first_review_at = None
 
-            contributor_keys.update(_ephemeral_pr_contributors(pr))
             safe_pr = _safe_pr_document(
                 pr,
                 first_review_at=first_review_at,
                 is_shared_repo_pr=len(project_ids) > 1,
             )
-            if safe_pr["review_latency_days"] is not None:
+            # Both of these are windowed deliberately.  Accumulating them for
+            # every pull request the repository has ever had would make the
+            # row a lifetime average that is identical in every window, and a
+            # metric that cannot vary can never form a trend or a baseline.
+            if include_history or state == "open":
+                contributor_keys.update(_ephemeral_pr_contributors(pr))
+            if safe_pr["review_latency_days"] is not None and _in_window(first_review_at, since, until):
                 latency_values.append(float(safe_pr["review_latency_days"]))
             if state == "open":
                 open_prs.append(safe_pr)
@@ -1327,6 +1447,8 @@ def backfill_gitea_repo_activity(db: DatabaseLike | Mapping[str, Any], **kwargs:
 
 __all__ = [
     "AUTHENTIK_TEAMS_COLLECTION",
+    "PEOPLE_PORTAL_TEAMS_COLLECTION",
+    "PEOPLE_PORTAL_PROJECTS_COLLECTION",
     "GITEA_REPOS_COLLECTION",
     "REPO_ACTIVITY_COLLECTION",
     "REPO_ACTIVITY_EVIDENCE_COLLECTION",
@@ -1337,6 +1459,7 @@ __all__ = [
     "AuthentikTeamSyncAdapter",
     "AuthentikAdapter",
     "AuthentikIngestionAdapter",
+    "PeoplePortalDirectoryAdapter",
     "GiteaRepoActivityAdapter",
     "GiteaRepoSyncAdapter",
     "GiteaAdapter",

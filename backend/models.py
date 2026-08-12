@@ -14,7 +14,6 @@ from pydantic import (
     Field,
     StringConstraints,
     computed_field,
-    field_validator,
     model_validator,
 )
 from pymongo import ASCENDING, IndexModel

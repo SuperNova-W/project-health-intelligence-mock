@@ -26,7 +26,6 @@ from .models import (
     WarningEvidenceItem,
     WarningSeverity,
     WeeklySnapshotDocument,
-    utc_now,
 )
 
 WEEK_START = date(2026, 8, 3)

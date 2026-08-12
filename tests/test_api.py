@@ -470,6 +470,32 @@ def test_rerunning_rules_appends_versioned_immutable_snapshots(api: ApiHarness) 
     assert store.snapshots[0].model_dump(mode="json") == first_payload
 
 
+def test_rerunning_the_same_rule_version_is_idempotent(api: ApiHarness) -> None:
+    _add_project(api, "alpha")
+    _add_history(api, "alpha")
+
+    first = asyncio.run(
+        generate_weekly_snapshots(
+            settings=api.settings,
+            database=store,
+            week_start=WEEK_START,
+            rule_set_version="rules-v1",
+        )
+    )
+    second = asyncio.run(
+        generate_weekly_snapshots(
+            settings=api.settings,
+            database=store,
+            week_start=WEEK_START,
+            rule_set_version="rules-v1",
+        )
+    )
+
+    assert first == 1
+    assert second == 0
+    assert len(store.snapshots) == 1
+
+
 def test_feedback_write_also_creates_audit_event(api: ApiHarness) -> None:
     _add_project(api, "alpha")
     snapshot = _add_snapshot(api, "alpha")
