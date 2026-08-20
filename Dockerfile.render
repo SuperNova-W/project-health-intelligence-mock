@@ -1,0 +1,24 @@
+# Render-specific image. Identical to ./Dockerfile except it sets no
+# ENTRYPOINT: the shared Dockerfile hardcodes
+# `ENTRYPOINT ["python", "scripts/container_entrypoint.py"]`, which always
+# runs regardless of a `dockerCommand` override (ENTRYPOINT args are
+# appended to, never replaced by, CMD) -- fine for compose.live-test.yaml,
+# which relies on that entrypoint to wait for the local Gitea/People Portal
+# containers and pre-sync before serving, but wrong here: Render's cron jobs
+# and web service each supply their own dockerCommand in render.yaml and
+# need it to actually run.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY backend ./backend
+COPY scripts ./scripts
+
+RUN pip install --no-cache-dir .
+
+EXPOSE 8000

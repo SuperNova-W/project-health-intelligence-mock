@@ -3,18 +3,28 @@
 # The frontend stays on Vercel and is not part of this blueprint; it calls
 # this API's public URL directly (see window.PHI_API_BASE in index.html).
 #
+# Every service here builds from Dockerfile.render, NOT the repo's top-level
+# Dockerfile -- that one hardcodes
+# `ENTRYPOINT ["python", "scripts/container_entrypoint.py"]` for
+# compose.live-test.yaml, and a Docker ENTRYPOINT always runs regardless of
+# a dockerCommand override (CMD args are appended to it, never replace it).
+# Dockerfile.render sets no ENTRYPOINT so each service's dockerCommand below
+# actually controls what runs.
+#
 # SQLite lives on a persistent disk attached ONLY to the web service --
 # Render disks are single-service, so the cron jobs below never touch it
 # directly. Instead they call the web service's own /admin/sync/* endpoints
 # over HTTPS, which run the same backend.jobs functions in-process against
 # the connection the web service already holds. Set PHI_ADMIN_SYNC_TOKEN
 # (below) to a real secret before the first deploy -- those endpoints refuse
-# every request until it's configured.
+# every request until it's configured. The cron commands use a Python
+# urllib one-liner rather than curl, since curl isn't installed in the
+# python:3.12-slim base image.
 services:
   - type: web
     name: app-dev-horizon-api
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.render
     dockerContext: .
     dockerCommand: python -m uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     plan: starter
@@ -57,11 +67,13 @@ services:
   - type: cron
     name: app-dev-horizon-backfill
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.render
     dockerContext: .
     dockerCommand: >-
-      curl -fsS -X POST "https://app-dev-horizon-api.onrender.com/admin/sync/backfill?weeks=10"
-      -H "X-Admin-Sync-Token: $PHI_ADMIN_SYNC_TOKEN"
+      python -c "import os,urllib.request as u;
+      r=u.Request('https://app-dev-horizon-api.onrender.com/admin/sync/backfill?weeks=10',
+      method='POST', headers={'X-Admin-Sync-Token': os.environ['PHI_ADMIN_SYNC_TOKEN']});
+      print(u.urlopen(r, timeout=1800).read().decode())"
     plan: starter
     region: oregon
     schedule: "0 0 31 2 *"
@@ -72,11 +84,13 @@ services:
   - type: cron
     name: app-dev-horizon-nightly
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.render
     dockerContext: .
     dockerCommand: >-
-      curl -fsS -X POST "https://app-dev-horizon-api.onrender.com/admin/sync/nightly?lookback_days=14"
-      -H "X-Admin-Sync-Token: $PHI_ADMIN_SYNC_TOKEN"
+      python -c "import os,urllib.request as u;
+      r=u.Request('https://app-dev-horizon-api.onrender.com/admin/sync/nightly?lookback_days=14',
+      method='POST', headers={'X-Admin-Sync-Token': os.environ['PHI_ADMIN_SYNC_TOKEN']});
+      print(u.urlopen(r, timeout=600).read().decode())"
     plan: starter
     region: oregon
     schedule: "0 8 * * *" # 08:00 UTC daily
@@ -87,11 +101,13 @@ services:
   - type: cron
     name: app-dev-horizon-weekly
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.render
     dockerContext: .
     dockerCommand: >-
-      curl -fsS -X POST "https://app-dev-horizon-api.onrender.com/admin/sync/weekly"
-      -H "X-Admin-Sync-Token: $PHI_ADMIN_SYNC_TOKEN"
+      python -c "import os,urllib.request as u;
+      r=u.Request('https://app-dev-horizon-api.onrender.com/admin/sync/weekly',
+      method='POST', headers={'X-Admin-Sync-Token': os.environ['PHI_ADMIN_SYNC_TOKEN']});
+      print(u.urlopen(r, timeout=600).read().decode())"
     plan: starter
     region: oregon
     schedule: "59 23 * * 0" # Sunday 23:59 UTC -- matches .gitea/workflows/weekly-refresh.yaml
