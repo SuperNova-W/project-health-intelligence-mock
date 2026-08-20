@@ -780,6 +780,62 @@ def _pr_contributors(pr: Mapping[str, Any]) -> set[str]:
     return _identity_values(author) if isinstance(author, Mapping) else set()
 
 
+def discover_gitea_orgs(
+    *,
+    base_url: str | None,
+    token: str | None,
+    client: Any = None,
+    client_factory: Callable[..., Any] | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int = DEFAULT_MAX_PAGES,
+    timeout: float = 30.0,
+) -> list[dict[str, Any]]:
+    """List every org the token can see and, for each, its repos.
+
+    Used to auto-register one project boundary per org (rather than requiring
+    ``PHI_GITEA_ORG`` to name a single org) when the Gitea instance hosts many
+    independent project orgs, as App Dev Club's does — one org per team.
+
+    Returns ``[{"org": <username>, "repos": [{"id": <int>, "name": <str>}, ...]}, ...]``.
+    A repo's numeric ``id`` is Gitea-instance-wide unique, unlike its name, so
+    callers should key boundary ``gitea_repo_id`` values on it rather than on
+    the bare repo name to avoid same-named repos in different orgs colliding.
+    """
+
+    adapter = _HttpxAdapter(
+        base_url=base_url,
+        token=token,
+        client=client,
+        client_factory=client_factory,
+        timeout=timeout,
+    )
+    try:
+        orgs = adapter.pages("/api/v1/orgs", page_size=page_size, max_pages=max_pages)
+        discovered: list[dict[str, Any]] = []
+        for org in orgs:
+            org_name = org.get("username") or org.get("name")
+            if not org_name:
+                continue
+            repos = adapter.pages(
+                f"/api/v1/orgs/{quote(str(org_name), safe='')}/repos",
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+            discovered.append(
+                {
+                    "org": str(org_name),
+                    "repos": [
+                        {"id": repo.get("id"), "name": repo.get("name")}
+                        for repo in repos
+                        if repo.get("name")
+                    ],
+                }
+            )
+        return discovered
+    finally:
+        adapter.close()
+
+
 class GiteaRepoActivityAdapter(_HttpxAdapter):
     """Synchronize de-identified Gitea repo activity into raw append-only rows."""
 

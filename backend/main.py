@@ -16,7 +16,12 @@ from .seed import seed_demo_data
 async def lifespan(app: FastAPI):
     settings = get_settings()
     await init_db(settings)
-    await seed_demo_data()
+    # The bundled fixtures are for local/demo runs only. A production
+    # deployment ingests real projects through /boundaries and the
+    # /admin/sync/* jobs, so seeding mock data there would just leave it
+    # sitting alongside (or after a reset, reappearing next to) real data.
+    if settings.environment != "production":
+        await seed_demo_data()
     yield
     await close_db()
 

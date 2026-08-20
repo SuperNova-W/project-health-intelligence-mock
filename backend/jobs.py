@@ -392,6 +392,45 @@ async def build_gitea_adapter(
     )
 
 
+async def build_gitea_adapters(
+    settings: Settings,
+    database: Any,
+    staging: Any,
+    *,
+    at: date | None = None,
+) -> list[GiteaRepoActivityAdapter]:
+    """Construct one Gitea adapter per org to sync.
+
+    ``PHI_GITEA_ORG`` names a single org when set, preserving the original
+    single-org deployment shape. Left unset, the orgs to sync are instead
+    every distinct ``root_authentik_team_id`` recorded on a boundary --
+    ``POST /admin/sync/discover-projects`` stores the real Gitea org name
+    there for exactly this purpose, since a Gitea instance that hosts one org
+    per project team (App Dev Club's shape) has no single org to configure.
+    """
+
+    if settings.gitea_org:
+        return [await build_gitea_adapter(settings, database, staging, at=at)]
+
+    boundary_resolver = await build_boundary_resolver(database, at=at)
+    team_size_resolver = await build_team_size_resolver(staging, at=at, boundaries=database)
+    boundaries = await database.list("boundaries")
+    orgs = sorted({b.root_authentik_team_id for b in boundaries if getattr(b, "root_authentik_team_id", None)})
+    return [
+        GiteaRepoActivityAdapter(
+            staging,
+            base_url=settings.gitea_url,
+            token=settings.gitea_api_token,
+            organization=org,
+            aggregation_floor=settings.aggregation_floor,
+            collection_name=REPO_ACTIVITY_STAGING_COLLECTION,
+            boundary_resolver=boundary_resolver,
+            team_size_resolver=team_size_resolver,
+        )
+        for org in orgs
+    ]
+
+
 async def run_nightly_sync(
     settings: Settings | None = None,
     database: Any = None,
@@ -439,13 +478,12 @@ async def run_nightly_sync(
             if directory_source == "people_portal" and team_result.status != "not_configured"
             else None
         )
-        if gitea_adapter is None:
-            gitea_adapter = await build_gitea_adapter(
-                settings,
-                database,
-                staging,
-                at=started.date(),
-            )
+        gitea_adapters = [gitea_adapter] if gitea_adapter is not None else await build_gitea_adapters(
+            settings,
+            database,
+            staging,
+            at=started.date(),
+        )
         # Windows are ISO-week aligned rather than a rolling lookback: an
         # activity row is bucketed by the lower bound it was given, and a
         # rolling bound would land between weeks and never match the week
@@ -453,19 +491,20 @@ async def run_nightly_sync(
         # late-arriving reviews and merges still land in their own week.
         weeks_back = max(1, ceil(max(0, int(lookback_days)) / 7) or 1)
         repo_results: list[SyncResult] = []
-        for window_start, window_end in _week_windows(weeks_back, through=started.date()):
-            repo_results.append(
-                await _call_sync(
-                    gitea_adapter,
-                    {
-                        "sync_cycle_id": f"{cycle_id}_{window_start.isoformat()}",
-                        "synced_at": _iso(started),
-                        "since": datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc),
-                        "until": min(started, datetime.combine(window_end, datetime.max.time(), tzinfo=timezone.utc)),
-                        "backfill": False,
-                    },
+        for adapter in gitea_adapters:
+            for window_start, window_end in _week_windows(weeks_back, through=started.date()):
+                repo_results.append(
+                    await _call_sync(
+                        adapter,
+                        {
+                            "sync_cycle_id": f"{cycle_id}_{window_start.isoformat()}",
+                            "synced_at": _iso(started),
+                            "since": datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc),
+                            "until": min(started, datetime.combine(window_end, datetime.max.time(), tzinfo=timezone.utc)),
+                            "backfill": False,
+                        },
+                    )
                 )
-            )
         repo_result = _merge_sync_results(repo_results)
         fold_result = await fold_staging_activity(database, staging)
         statuses = {team_result.status, repo_result.status}
@@ -571,11 +610,12 @@ async def run_weekly_backfill(
     snapshots_created = 0
     try:
         for window_start, window_end in windows:
-            adapter = gitea_adapter
-            if adapter is None:
+            if gitea_adapter is not None:
+                adapters = [gitea_adapter]
+            else:
                 # Boundaries are resolved as of the window being replayed, so
                 # a historical week uses the boundary version in force then.
-                adapter = await build_gitea_adapter(
+                adapters = await build_gitea_adapters(
                     settings,
                     database,
                     staging,
@@ -584,22 +624,28 @@ async def run_weekly_backfill(
             cycle_id = f"backfill_{window_start.isoformat()}_{started.strftime('%H%M%S')}"
             since = datetime.combine(window_start, datetime.min.time(), tzinfo=timezone.utc)
             until = datetime.combine(window_end, datetime.max.time(), tzinfo=timezone.utc)
+            week_repo_results: list[SyncResult] = []
             try:
-                result = await _call_sync(
-                    adapter,
-                    {
-                        "sync_cycle_id": cycle_id,
-                        "synced_at": _iso(started),
-                        "since": since,
-                        "until": until,
-                        "backfill": True,
-                    },
-                )
+                for adapter in adapters:
+                    week_repo_results.append(
+                        await _call_sync(
+                            adapter,
+                            {
+                                "sync_cycle_id": cycle_id,
+                                "synced_at": _iso(started),
+                                "since": since,
+                                "until": until,
+                                "backfill": True,
+                            },
+                        )
+                    )
             finally:
                 if owns_adapter:
-                    closer = getattr(adapter, "close", None)
-                    if closer is not None:
-                        closer()
+                    for adapter in adapters:
+                        closer = getattr(adapter, "close", None)
+                        if closer is not None:
+                            closer()
+            result = _merge_sync_results(week_repo_results)
             week_results.append({"week_start": window_start.isoformat(), **result.as_dict()})
 
         fold_result = await fold_staging_activity(database, staging)
@@ -914,6 +960,7 @@ __all__ = [
     "run_weekly_backfill",
     "run_historical_backfill",
     "build_gitea_adapter",
+    "build_gitea_adapters",
     "generate_weekly_snapshots",
     "run_weekly_snapshot_job",
     "nightly_sync_job",

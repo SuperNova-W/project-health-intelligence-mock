@@ -34,6 +34,30 @@ The API reads no cookies; it authenticates with an Authentik OIDC bearer token. 
 
 The frontend sends it as `Authorization: Bearer <token>` and leaves the header off entirely when no token is configured. Obtaining and refreshing the token is the host page's responsibility — this mock deliberately implements no OIDC redirect flow of its own.
 
+## Admin sync endpoints (single-process hosts like Render)
+
+`scripts/run_jobs.py` needs a second process sharing the SQLite file, which a
+single Render web service can't offer (its persistent disk attaches to one
+service only). `POST /admin/sync/{nightly,weekly,backfill,discover-projects,reset}`
+run the same jobs in-process on the service that owns the database instead;
+every route requires an `X-Admin-Sync-Token` header matching
+`PHI_ADMIN_SYNC_TOKEN`, and refuses all requests when that setting is unset.
+
+- `POST /admin/sync/discover-projects` — for a Gitea instance that hosts one
+  org per project team (rather than one org with many project repos), there
+  is no single `PHI_GITEA_ORG` to configure. This lists every org the token
+  can see via the Gitea API and upserts a project + boundary per org covering
+  its current repos, so `nightly`/`backfill` below know what to pull. Safe to
+  re-run as new orgs/repos appear; only re-versions a boundary when its repo
+  set actually changed. Set `PHI_GITEA_ORG` instead to pin the deployment to
+  a single, explicit org and skip discovery entirely.
+- `POST /admin/sync/reset?confirm=erase-all-data` — wipes every row in every
+  collection, including immutable weekly snapshots. Irreversible; meant as a
+  one-time step to clear the bundled demo fixtures before pointing the
+  service at a real org for the first time.
+- `POST /admin/sync/backfill?weeks=N` and `POST /admin/sync/nightly` — see
+  "Live data" below for what each does and the order to run them in.
+
 ## Live data
 
 Point the service at a real Gitea organization and People Portal backend, then drive
