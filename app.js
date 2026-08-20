@@ -55,6 +55,10 @@ const state = {
   projects: [],
   projectSnapshots: {},
   projectSnapshotMeta: {},
+  calendarDate: null,
+  calendarLoading: false,
+  calendarError: null,
+  calendarResult: null,
 };
 
 let currentView = 'overview';
@@ -711,6 +715,21 @@ function overviewAssessmentSummary(projects) {
   return `<section class="panel ci-overview-summary"><div class="ci-summary-copy"><span class="eyebrow">CI project health</span><h2 class="panel-title">Early project-spec coverage</h2><p class="panel-subtitle">Coverage is counted only when the server returns an inspectable assessment.</p></div><div class="ci-summary-stats"><div><strong>${assessed.length}/${projects.length}</strong><span>projects assessed</span></div><div><strong>${attention.length}</strong><span>need attention</span></div></div><button class="panel-link ci-attention-link" data-dashboard-filter="Needs attention" type="button">Open attention table →</button></section>`;
 }
 
+function calendarControlMarkup() {
+  const today = new Date().toISOString().slice(0, 10);
+  return `<div class="calendar-control"><label for="calendar-date-input">${icon('calendar')}<span>View portfolio as of</span></label><input type="date" id="calendar-date-input" max="${today}" value="${escapeHtml(state.calendarDate || '')}" />${state.calendarDate ? '<button class="text-button" id="calendar-clear">Back to live ×</button>' : ''}</div>`;
+}
+
+function calendarPanelMarkup() {
+  if (!state.calendarDate) return '';
+  if (state.calendarLoading) return `<section class="panel calendar-panel">${loadingPanel('Loading portfolio snapshot…')}</section>`;
+  if (state.calendarError) return `<section class="panel calendar-panel">${errorPanel(state.calendarError.message || 'That date could not be loaded.', 'retry-calendar')}</section>`;
+  const result = state.calendarResult;
+  const items = result?.projects || [];
+  const weekLabel = result?.snapshotWeekStart ? `${formatDate(result.snapshotWeekStart)} – ${formatDate(result.snapshotWeekEnd)}` : null;
+  return `<section class="panel calendar-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio as of ${escapeHtml(formatDate(state.calendarDate))}</h2><p class="panel-subtitle">${weekLabel ? `Week of ${escapeHtml(weekLabel)} · the verdict as it was judged that week, not re-scored against today's rules.` : 'No snapshot has been computed for this week.'}</p></div></div><div class="queue-list">${items.length ? items.map((project) => `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`).join('') : '<div class="history-empty" style="padding:20px;">No projects to show.</div>'}</div></section>`;
+}
+
 function renderOverview() {
   const projects = state.projects;
   const attention = projects.filter(isAttentionProject);
@@ -729,7 +748,8 @@ function renderOverview() {
     title: ['Pull request aging', 'Activity trend', 'Contributor resilience'][index],
     copy: ['Review or decision bottlenecks', 'Below project baseline', 'Aggregate count only'][index],
   }));
-  return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning</h1><p>Here’s the current read on the projects that matter this week.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div></div></div>
+  return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning</h1><p>Here’s the current read on the projects that matter this week.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div>${calendarControlMarkup()}</div></div>
+    ${calendarPanelMarkup()}
     <div class="stat-grid"><button class="stat-card total dashboard-filter" data-dashboard-filter="Active projects" type="button"><span class="stat-label"><span>Active projects</span><span class="stat-icon">${icon('folder')}</span></span><span class="stat-value">${active.length}</span><span class="stat-foot">Current snapshot</span></button><button class="stat-card attention dashboard-filter" data-dashboard-filter="Needs attention" type="button"><span class="stat-label"><span>Need attention</span><span class="stat-icon">${icon('triangle')}</span></span><span class="stat-value">${attention.length}</span><span class="stat-foot">Warnings with evidence</span></button><button class="stat-card clear dashboard-filter" data-dashboard-filter="Clear" type="button"><span class="stat-label"><span>Clear</span><span class="stat-icon">${icon('check-circle')}</span></span><span class="stat-value">${clear.length}</span><span class="stat-foot">Explicit server status only</span></button><button class="stat-card data dashboard-filter" data-dashboard-filter="Insufficient data" type="button"><span class="stat-label"><span>Insufficient data</span><span class="stat-icon">${icon('database')}</span></span><span class="stat-value">${insufficient.length}</span><span class="stat-foot">Signals remain suppressed</span></button></div>
     ${overviewAssessmentSummary(projects)}
     <div class="insight-banner"><div class="insight-banner-icon">${icon(attention.length ? 'sparkle' : 'database')}</div><div class="insight-copy"><strong>${attention.length ? `${attention.length} projects may need leadership attention this week.` : 'No inspectable warnings are in the current queue.'}</strong><span>${attention.length ? 'Review the evidence, add context, and decide what to verify with each team.' : 'Insufficient data and planned pauses stay out of the attention queue.'}</span></div><button class="insight-link" id="banner-review">Review attention queue →</button></div>
@@ -835,6 +855,31 @@ async function loadLatestSnapshot() {
   }
 }
 
+async function loadCalendarSnapshot(dateStr) {
+  state.calendarDate = dateStr;
+  state.calendarLoading = true;
+  state.calendarError = null;
+  render();
+  try {
+    const raw = await requestJson(`/snapshots/at?date=${encodeURIComponent(dateStr)}`);
+    state.calendarResult = normalizeSnapshot(raw);
+    state.calendarResult.hasData = Boolean(raw?.has_data);
+    state.calendarLoading = false;
+    render();
+  } catch (error) {
+    state.calendarLoading = false;
+    state.calendarError = error;
+    render();
+  }
+}
+
+function clearCalendarSnapshot() {
+  state.calendarDate = null;
+  state.calendarResult = null;
+  state.calendarError = null;
+  render();
+}
+
 function projectFromSnapshotResponse(raw, projectId) {
   const withProfileAssessment = (project, envelope) => {
     if (!project || typeof project !== 'object' || !envelope || typeof envelope !== 'object') return project;
@@ -936,6 +981,11 @@ async function saveFeedback() {
 }
 
 function bindViewEvents() {
+  document.getElementById('calendar-date-input')?.addEventListener('change', (event) => {
+    if (event.target.value) loadCalendarSnapshot(event.target.value);
+  });
+  document.getElementById('calendar-clear')?.addEventListener('click', clearCalendarSnapshot);
+  document.getElementById('retry-calendar')?.addEventListener('click', () => { if (state.calendarDate) loadCalendarSnapshot(state.calendarDate); });
   document.querySelectorAll('.view-project').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
     selectedProjectId = button.dataset.projectId;

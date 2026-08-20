@@ -70,12 +70,20 @@ async def trigger_weekly_snapshot(
 @router.post("/backfill")
 async def trigger_backfill(
     weeks: int = Query(default=10, ge=1, le=52),
+    through: date | None = Query(
+        default=None,
+        description="Replay the N weeks ending on this date, instead of ending today. "
+        "Lets a large backfill be split into smaller sequential HTTP calls "
+        "(e.g. weeks=4 with `through` stepping back 4 weeks each call) so no "
+        "single request runs long enough to risk a client/proxy timeout.",
+    ),
     x_admin_sync_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _check_token(x_admin_sync_token)
     return await run_weekly_backfill(
         settings=get_settings(),
         database=get_active_repository(),
+        through=through,
         weeks=weeks,
     )
 

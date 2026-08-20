@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import uuid
@@ -320,6 +320,59 @@ async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[st
         if project:
             items.append(await _project_response(project, snapshot))
     return _snapshot_envelope(snapshots, items)
+
+
+@router.get("/snapshots/at")
+async def snapshot_at_date(
+    on: date = Query(alias="date"),
+    user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Portfolio status for the ISO week containing ``date``.
+
+    Snapshots are immutable and weekly, so this never recomputes anything --
+    it serves the same historical verdict that ``run_weekly_backfill`` (or a
+    normal weekly job) already persisted for that week, i.e. what the rules
+    said *at the time* using only the data that existed before it. A week
+    with no persisted snapshot (before the portfolio's backfilled history, or
+    the current in-progress week) returns each project in its ordinary
+    "no snapshot available" shape rather than an error.
+    """
+    database = _db()
+    week_start = on - timedelta(days=on.weekday())
+    week_end = week_start + timedelta(days=6)
+    all_projects = await database.list("projects")
+    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    by_project: dict[str, WeeklySnapshotDocument] = {}
+    for row in await database.list("snapshots"):
+        if row.week_start != week_start:
+            continue
+        current = by_project.get(row.project_id)
+        if current is None or row.generated_at > current.generated_at:
+            by_project[row.project_id] = row
+    items: list[dict[str, Any]] = []
+    snapshots: list[WeeklySnapshotDocument] = []
+    for project_id in ids:
+        snapshot = by_project.get(project_id)
+        if snapshot:
+            snapshots.append(snapshot)
+        project = await database.get_project(project_id)
+        if project:
+            items.append(await _project_response(project, snapshot))
+    rule_versions = {item.rule_set_version for item in snapshots}
+    generated_ats = [item.generated_at for item in snapshots]
+    last_syncs = [item.last_sync_at for item in snapshots if item.last_sync_at]
+    completeness = round(sum(item.data_completeness_pct for item in snapshots) / len(snapshots), 1) if snapshots else 0
+    return {
+        "date": on,
+        "has_data": bool(snapshots),
+        "snapshot_week_start": week_start,
+        "snapshot_week_end": week_end,
+        "generated_at": max(generated_ats) if generated_ats else None,
+        "rule_set_version": next(iter(rule_versions)) if len(rule_versions) == 1 else ("mixed" if rule_versions else "none"),
+        "data_completeness_pct": completeness,
+        "last_sync_at": max(last_syncs) if last_syncs else None,
+        "projects": items,
+    }
 
 
 @router.get("/projects/{project_id}/snapshots")
