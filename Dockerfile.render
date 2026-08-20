@@ -22,3 +22,11 @@ COPY scripts ./scripts
 RUN pip install --no-cache-dir .
 
 EXPOSE 8000
+
+# Render's dashboard "Docker Command" field is passed to the container
+# directly (exec form), not through a shell -- so a literal `$PORT` in that
+# field is never expanded and gets handed to uvicorn as the string "$PORT",
+# which crashes on startup with no logs. Baking the start command into CMD
+# with an explicit shell removes that dependency; clear the dashboard's
+# Docker Command field so this is what actually runs.
+CMD ["sh", "-c", "python -m uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
