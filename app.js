@@ -169,6 +169,106 @@ function normalizeHistory(value) {
   }).filter(Boolean);
 }
 
+const assessmentStatusMeta = {
+  risk: { label: 'At risk', className: 'risk' },
+  at_risk: { label: 'At risk', className: 'risk' },
+  watch: { label: 'Watch', className: 'watch' },
+  okay: { label: 'Okay', className: 'clear' },
+  ok: { label: 'Okay', className: 'clear' },
+  clear: { label: 'Okay', className: 'clear' },
+  healthy: { label: 'Okay', className: 'clear' },
+  on_track: { label: 'Okay', className: 'clear' },
+  blocked: { label: 'Blocked', className: 'risk' },
+  insufficient_data: { label: 'Insufficient data', className: 'neutral' },
+  planned_pause: { label: 'Planned pause', className: 'neutral' },
+};
+
+function assessmentSource(rawProject) {
+  const raw = rawProject && typeof rawProject === 'object' ? rawProject : {};
+  const candidates = [
+    raw.healthAssessment,
+    raw.health_assessment,
+    raw.projectHealthAssessment,
+    raw.project_health_assessment,
+    raw.profile?.healthAssessment,
+    raw.profile?.health_assessment,
+    raw.projectProfile?.healthAssessment,
+    raw.project_profile?.health_assessment,
+    raw.projectAgent?.healthAssessment,
+    raw.project_agent?.health_assessment,
+    raw.agent?.healthAssessment,
+    raw.agent?.health_assessment,
+    raw.projectAgent,
+    raw.project_agent,
+    raw.agent,
+  ];
+  return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate) && Object.keys(candidate).some((key) => /status|score|confidence|expected.?week|explanation|summary|blocker|task|recommend|citation|evidence/i.test(key))) || null;
+}
+
+function normalizeAssessmentStatus(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return { label: null, className: 'neutral' };
+  const key = raw.toLowerCase().replaceAll('-', '_').replaceAll(' ', '_');
+  return assessmentStatusMeta[key] || { label: raw, className: 'neutral' };
+}
+
+function normalizeAssessmentItems(value, kind) {
+  return asArray(value).map((item) => {
+    if (typeof item === 'string' && item.trim()) return { title: item.trim(), detail: null, week: null };
+    if (!item || typeof item !== 'object') return null;
+    const title = firstDefined(item.title, item.task, item.name, item.label, item.blocker, item.recommendation, item.text, null);
+    if (!title || !String(title).trim()) return null;
+    return {
+      title: String(title).trim(),
+      detail: firstDefined(item.detail, item.description, item.reason, item.explanation, null),
+      week: firstDefined(item.week, item.expected_week, item.expectedWeek, null),
+      kind,
+    };
+  }).filter(Boolean);
+}
+
+function normalizeAssessmentCitations(value) {
+  return asArray(value).map((item) => {
+    if (typeof item === 'string' && item.trim()) return { label: item.trim(), reference: item.trim(), url: null };
+    if (!item || typeof item !== 'object') return null;
+    const sourceReference = [item.source_type, item.sourceType, item.source_id, item.sourceId, item.source_field, item.sourceField].filter((part) => part !== undefined && part !== null && String(part).trim()).join(':');
+    const reference = firstDefined(item.reference, item.reference_id, item.referenceId, sourceReference, item.source_id, item.sourceId, item.uri, item.url, item.ref, item.id, null);
+    if (!reference || !String(reference).trim()) return null;
+    return {
+      label: firstDefined(item.label, item.title, item.source, item.name, null),
+      reference: String(reference).trim(),
+      url: firstDefined(item.url, item.uri, null),
+    };
+  }).filter(Boolean);
+}
+
+function normalizeHealthAssessment(rawProject) {
+  const source = assessmentSource(rawProject);
+  if (!source) return null;
+  const status = normalizeAssessmentStatus(firstDefined(source.status, source.rag_status, source.ragStatus, source.assessment_status, source.assessmentStatus, source.health_status, source.healthStatus));
+  const score = finiteNumber(firstDefined(source.score, source.health_score, source.healthScore, source.rag_score, source.ragScore));
+  const confidence = finiteNumber(firstDefined(source.confidence, source.confidence_score, source.confidenceScore));
+  const expectedWeek = firstDefined(source.expected_week, source.expectedWeek, source.expected_week_number, source.expectedWeekNumber, source.target_week, source.targetWeek, null);
+  const explanation = firstDefined(source.explanation, source.summary, source.rationale, source.reason, null);
+  const blockers = normalizeAssessmentItems(firstDefined(source.blockers, source.blocking_items, source.blockingItems, source.risks, []), 'blocker');
+  const weeklyTasks = normalizeAssessmentItems(firstDefined(source.recommended_weekly_tasks, source.recommendedWeeklyTasks, source.weekly_tasks, source.weeklyTasks, source.recommended_tasks, source.recommendedTasks, source.tasks, []), 'task');
+  const citationInputs = [source.citations, source.evidence_references, source.evidenceReferences, source.evidence_refs, source.evidenceRefs, source.evidence_citations, source.spec_citations, source.sources].flatMap((value) => asArray(value));
+  const citations = normalizeAssessmentCitations(citationInputs);
+  const hasInspectableFields = Boolean(status.label || score !== null || confidence !== null || expectedWeek !== null || explanation || blockers.length || weeklyTasks.length || citations.length);
+  if (!hasInspectableFields) return null;
+  return {
+    status: status.label,
+    statusClass: status.className,
+    score,
+    confidence,
+    expectedWeek,
+    explanation,
+    blockers,
+    weeklyTasks,
+    citations,
+  };
+}
+
 function normalizeStatus(value) {
   const status = String(value || '').toLowerCase().replaceAll('-', '_').replaceAll(' ', '_');
   if (status === 'at_risk' || status === 'risk') return ['At risk', 'risk'];
@@ -189,6 +289,7 @@ function metricValue(metrics, key, fallback = null) {
 
 function normalizeProject(rawProject, snapshotMeta = {}) {
   const raw = rawProject && typeof rawProject === 'object' ? rawProject : {};
+  const healthAssessment = normalizeHealthAssessment(raw);
   const metrics = normalizeMetricObject(firstDefined(raw.metrics, raw.metric_values, {}));
   const baselines = normalizeMetricObject(firstDefined(raw.baselines, raw.baseline_metrics, {}));
   const rawSeries = raw.series && typeof raw.series === 'object' ? raw.series : {};
@@ -281,6 +382,7 @@ function normalizeProject(rawProject, snapshotMeta = {}) {
     dataCompletenessPct: completeness,
     lastSyncAt: firstDefined(raw.last_sync_at, snapshotMeta.lastSyncAt, null),
     snapshotId: firstDefined(raw.snapshot_id, snapshotMeta.snapshotId, null),
+    healthAssessment,
   };
 }
 
@@ -570,6 +672,45 @@ function historyCard(project) {
   return `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Review history</h2><p class="panel-subtitle">Recorded decisions for this project</p></div></div><div class="history-list">${items.length ? items.map((item) => `<div class="history-item"><div class="history-top"><span class="history-action">${escapeHtml(item.action)}</span><span class="history-date">${escapeHtml(formatDate(item.date, true))}</span></div>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div>`).join('') : '<div class="history-empty">No review notes recorded for this project.</div>'}</div></section>`;
 }
 
+function assessmentNumber(value, asPercent = false) {
+  const number = finiteNumber(value);
+  if (number === null) return '—';
+  if (asPercent && number >= 0 && number <= 1) return `${Math.round(number * 100)}%`;
+  return `${Number(number.toFixed(2))}${asPercent ? '%' : ''}`;
+}
+
+function assessmentCitation(item) {
+  const label = item.label && item.label !== item.reference ? `${item.label} · ` : '';
+  const reference = `${label}${item.reference}`;
+  const safeUrl = typeof item.url === 'string' && /^https?:\/\//i.test(item.url) ? item.url : null;
+  return safeUrl
+    ? `<li><a href="${escapeHtml(safeUrl)}" target="_blank" rel="noreferrer">${escapeHtml(reference)}</a></li>`
+    : `<li>${escapeHtml(reference)}</li>`;
+}
+
+function assessmentItems(items, emptyCopy) {
+  if (!items.length) return `<p class="assessment-empty">${escapeHtml(emptyCopy)}</p>`;
+  return `<ul class="assessment-list">${items.map((item) => `<li><strong>${escapeHtml(item.title)}</strong>${item.week !== null && item.week !== undefined ? `<span class="assessment-week">Week ${escapeHtml(item.week)}</span>` : ''}${item.detail ? `<span>${escapeHtml(item.detail)}</span>` : ''}</li>`).join('')}</ul>`;
+}
+
+function healthAssessmentCard(project) {
+  const assessment = project.healthAssessment;
+  if (!assessment) {
+    return `<section class="panel ci-assessment ci-assessment-unavailable"><div class="panel-header"><div><span class="eyebrow">CI project health</span><h2 class="panel-title">Assessment not available</h2><p class="panel-subtitle">The CI agent has not returned an inspectable assessment for this project.</p></div><span class="assessment-badge neutral">Unavailable</span></div><div class="assessment-empty-body">Project health stays separate from the repository signals until the server provides status, evidence, or recommendations.</div></section>`;
+  }
+  const statusClass = ['risk', 'watch', 'clear'].includes(assessment.statusClass) ? assessment.statusClass : 'neutral';
+  const statusLabel = assessment.status || 'Assessment returned';
+  const metrics = `<div class="assessment-metrics"><div><span>Score</span><strong>${escapeHtml(assessmentNumber(assessment.score))}</strong></div><div><span>Confidence</span><strong>${escapeHtml(assessmentNumber(assessment.confidence, true))}</strong></div><div><span>Expected week</span><strong>${assessment.expectedWeek === null || assessment.expectedWeek === undefined ? '—' : `Week ${escapeHtml(assessment.expectedWeek)}`}</strong></div></div>`;
+  const citations = assessment.citations.length ? `<div class="assessment-block"><h3>Evidence references</h3><ul class="assessment-citations">${assessment.citations.map(assessmentCitation).join('')}</ul></div>` : '';
+  return `<section class="panel ci-assessment"><div class="panel-header"><div><span class="eyebrow">CI project health</span><h2 class="panel-title">${escapeHtml(statusLabel)}</h2><p class="panel-subtitle">Server-provided assessment against the project specification and weekly plan.</p></div><span class="assessment-badge ${statusClass}">${escapeHtml(statusLabel)}</span></div>${metrics}${assessment.explanation ? `<div class="assessment-explanation">${escapeHtml(assessment.explanation)}</div>` : ''}<div class="assessment-columns"><div class="assessment-block"><h3>Blockers</h3>${assessmentItems(assessment.blockers, 'No blockers returned.')}</div><div class="assessment-block"><h3>Recommended weekly tasks</h3>${assessmentItems(assessment.weeklyTasks, 'No weekly tasks returned.')}</div></div>${citations}</section>`;
+}
+
+function overviewAssessmentSummary(projects) {
+  const assessed = projects.filter((project) => project.healthAssessment);
+  const attention = assessed.filter((project) => ['risk', 'watch'].includes(project.healthAssessment.statusClass));
+  return `<section class="panel ci-overview-summary"><div class="ci-summary-copy"><span class="eyebrow">CI project health</span><h2 class="panel-title">Early project-spec coverage</h2><p class="panel-subtitle">Coverage is counted only when the server returns an inspectable assessment.</p></div><div class="ci-summary-stats"><div><strong>${assessed.length}/${projects.length}</strong><span>projects assessed</span></div><div><strong>${attention.length}</strong><span>need attention</span></div></div><button class="panel-link ci-attention-link" data-dashboard-filter="Needs attention" type="button">Open attention table →</button></section>`;
+}
+
 function renderOverview() {
   const projects = state.projects;
   const attention = projects.filter(isAttentionProject);
@@ -590,6 +731,7 @@ function renderOverview() {
   }));
   return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning, Jordan</h1><p>Here’s the current read on the projects that matter this week.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div></div></div>
     <div class="stat-grid"><button class="stat-card total dashboard-filter" data-dashboard-filter="Active projects" type="button"><span class="stat-label"><span>Active projects</span><span class="stat-icon">${icon('folder')}</span></span><span class="stat-value">${active.length}</span><span class="stat-foot">Current snapshot</span></button><button class="stat-card attention dashboard-filter" data-dashboard-filter="Needs attention" type="button"><span class="stat-label"><span>Need attention</span><span class="stat-icon">${icon('triangle')}</span></span><span class="stat-value">${attention.length}</span><span class="stat-foot">Warnings with evidence</span></button><button class="stat-card clear dashboard-filter" data-dashboard-filter="Clear" type="button"><span class="stat-label"><span>Clear</span><span class="stat-icon">${icon('check-circle')}</span></span><span class="stat-value">${clear.length}</span><span class="stat-foot">Explicit server status only</span></button><button class="stat-card data dashboard-filter" data-dashboard-filter="Insufficient data" type="button"><span class="stat-label"><span>Insufficient data</span><span class="stat-icon">${icon('database')}</span></span><span class="stat-value">${insufficient.length}</span><span class="stat-foot">Signals remain suppressed</span></button></div>
+    ${overviewAssessmentSummary(projects)}
     <div class="insight-banner"><div class="insight-banner-icon">${icon(attention.length ? 'sparkle' : 'database')}</div><div class="insight-copy"><strong>${attention.length ? `${attention.length} projects may need leadership attention this week.` : 'No inspectable warnings are in the current queue.'}</strong><span>${attention.length ? 'Review the evidence, add context, and decide what to verify with each team.' : 'Insufficient data and planned pauses stay out of the attention queue.'}</span></div><button class="insight-link" id="banner-review">Review attention queue →</button></div>
     <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-header"><div><h2 class="panel-title">Attention queue</h2><p class="panel-subtitle">Only server-issued warnings with evidence references appear here.</p></div><button class="panel-link" id="queue-filter">View all projects</button></div><div class="queue-list">${attention.length ? attention.map((project) => `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`).join('') : '<div class="history-empty" style="padding:20px;">No projects require attention from this snapshot.</div>'}</div></section><div><section class="panel pulse-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio pulse</h2><p class="panel-subtitle">Historical queue series is shown only when returned by the API.</p></div><span class="eyebrow">Snapshot</span></div><div class="pulse-chart"><div class="chart-empty" style="width:100%;height:128px;">Historical queue data unavailable</div></div><div class="pulse-footer"><div class="chart-legend"><span class="legend-line"></span> Evidence-backed status</div><span class="chart-note">No inferred history</span></div></section><section class="panel signal-panel"><div class="panel-header"><div><h2 class="panel-title">Signal mix</h2><p class="panel-subtitle">What is driving this week’s queue</p></div></div><div class="signal-list">${signalCounts.map((signal) => `<div class="signal-row"><span class="signal-icon ${signal.metric === 'openPRs' ? 'red' : signal.metric === 'activity' ? 'amber' : 'blue'}">${icon(signal.icon)}</span><div class="signal-copy"><strong>${signal.title}</strong><span>${signal.copy}</span></div><span class="signal-count">${signal.count}</span></div>`).join('')}</div></section></div></div>`;
 }
@@ -619,7 +761,7 @@ function renderInsights() {
 
 function renderProjectProfile(project) {
   const meta = statusMeta[project.statusClass] || statusMeta.data;
-  return `<div class="page-heading"><div><button class="text-button back-link" id="profile-back"><span>←</span> Back to inventory</button><div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p>${snapshotMetaMarkup(project, true)}</div>${statusPill(project)}</div></div></div><div class="detail-status wide ${escapeHtml(project.statusClass)}"><strong>${escapeHtml(project.status)}</strong><span>${escapeHtml(meta.copy)}</span></div>${metricCharts(project)}${aggregateMetricsSection(project)}<div class="profile-grid"><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Warnings require inspectable source evidence.</p></div><span class="eyebrow">${escapeHtml(formatPercent(project.dataCompletenessPct))} complete</span></div><div class="evidence-section wide">${evidenceList(project, 'lg')}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${escapeHtml(meta.cta)} <span>→</span></button></div></section><div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div></div>`;
+  return `<div class="page-heading"><div><button class="text-button back-link" id="profile-back"><span>←</span> Back to inventory</button><div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p>${snapshotMetaMarkup(project, true)}</div>${statusPill(project)}</div></div></div><div class="detail-status wide ${escapeHtml(project.statusClass)}"><strong>${escapeHtml(project.status)}</strong><span>${escapeHtml(meta.copy)}</span></div>${healthAssessmentCard(project)}${metricCharts(project)}${aggregateMetricsSection(project)}<div class="profile-grid"><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Warnings require inspectable source evidence.</p></div><span class="eyebrow">${escapeHtml(formatPercent(project.dataCompletenessPct))} complete</span></div><div class="evidence-section wide">${evidenceList(project, 'lg')}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${escapeHtml(meta.cta)} <span>→</span></button></div></section><div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div></div>`;
 }
 
 function loadingPanel(message) {
@@ -694,7 +836,12 @@ async function loadLatestSnapshot() {
 }
 
 function projectFromSnapshotResponse(raw, projectId) {
-  if (raw && raw.project) return raw.project;
+  const withProfileAssessment = (project, envelope) => {
+    if (!project || typeof project !== 'object' || !envelope || typeof envelope !== 'object') return project;
+    const assessment = firstDefined(envelope.healthAssessment, envelope.health_assessment, envelope.projectHealthAssessment, envelope.project_health_assessment, envelope.agent?.healthAssessment, envelope.agent?.health_assessment, null);
+    return assessment && !project.healthAssessment && !project.health_assessment ? { ...project, healthAssessment: assessment } : project;
+  };
+  if (raw && raw.project) return withProfileAssessment(raw.project, raw);
   if (raw && raw.snapshot && Array.isArray(raw.snapshot.projects)) return raw.snapshot.projects.find((project) => project.id === projectId) || raw.snapshot.projects[0];
   if (raw && Array.isArray(raw.projects)) return raw.projects.find((project) => project.id === projectId) || raw.projects[0];
   if (raw && Array.isArray(raw.items)) return projectFromSnapshotResponse(raw.items, projectId);

@@ -50,39 +50,7 @@ DEFAULT_AGGREGATION_FLOOR = 5
 DEFAULT_PAGE_SIZE = 100
 DEFAULT_MAX_PAGES = 10_000
 
-_SENSITIVE_KEYS = {
-    "username",
-    "user_name",
-    "user_id",
-    "userid",
-    "contributor_id",
-    "contributor_ids",
-    "contributor",
-    "contributors",
-    "contributor_identities",
-    "gitea_username",
-    "gitea_usernames",
-    "identity_ref",
-    "identity_refs",
-    "author",
-    "author_id",
-    "author_identity_ref",
-    "committer",
-    "committer_id",
-    "email",
-    "emails",
-    "commit",
-    "commits",
-    "commit_id",
-    "commit_sha",
-    "sha",
-    "additions",
-    "deletions",
-    "line_count",
-    "lines_added",
-    "lines_removed",
-    "lines_changed",
-}
+_SENSITIVE_KEYS: set[str] = set()  # Identity storage is enabled; no fields are blocked.
 
 
 class CollectionLike(Protocol):
@@ -179,11 +147,6 @@ def _parse_datetime(value: datetime | date | str | None) -> datetime | None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
     return None
-
-
-def _date_string(value: Any) -> str | None:
-    parsed = _parse_datetime(value)
-    return parsed.date().isoformat() if parsed else None
 
 
 def _number(value: Any) -> int | None:
@@ -780,8 +743,13 @@ def _safe_pr_document(
     latency_days = None
     if opened_at is not None and first_review_at is not None:
         latency_days = round(max(0.0, (first_review_at - opened_at).total_seconds() / 86400), 3)
+    author = pr.get("user") or {}
+    author_login = author.get("login") or author.get("username") or None
+    author_name = author.get("full_name") or author.get("name") or None
     return {
         "pr_id": _pr_number(pr),
+        "author_login": author_login,
+        "author_name": author_name,
         "opened_at": _iso(opened_at),
         "first_review_at": _iso(first_review_at),
         "merged_at": _iso(merged_at),
@@ -796,25 +764,20 @@ def _review_timestamp(review: Mapping[str, Any]) -> datetime | None:
     return _parse_datetime(review.get("submitted_at", review.get("created_at", review.get("updated_at"))))
 
 
-def _ephemeral_identity_values(payload: Mapping[str, Any]) -> set[str]:
-    """Extract only short-lived distinct keys for aggregate counting.
-
-    This function's result never leaves the sync call.  It intentionally does
-    not accept numeric contributor/user ids, and callers must discard the set
-    after deriving the aggregate.
-    """
+def _identity_values(payload: Mapping[str, Any]) -> set[str]:
+    """Extract contributor identifiers (login, username, full name) for storage."""
 
     values: set[str] = set()
-    for key in ("login", "username"):
+    for key in ("login", "username", "full_name", "name"):
         value = payload.get(key)
-        if isinstance(value, str) and value:
-            values.add(value)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip())
     return values
 
 
-def _ephemeral_pr_contributors(pr: Mapping[str, Any]) -> set[str]:
+def _pr_contributors(pr: Mapping[str, Any]) -> set[str]:
     author = pr.get("user")
-    return _ephemeral_identity_values(author) if isinstance(author, Mapping) else set()
+    return _identity_values(author) if isinstance(author, Mapping) else set()
 
 
 class GiteaRepoActivityAdapter(_HttpxAdapter):
@@ -1201,7 +1164,7 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
             # row a lifetime average that is identical in every window, and a
             # metric that cannot vary can never form a trend or a baseline.
             if include_history or state == "open":
-                contributor_keys.update(_ephemeral_pr_contributors(pr))
+                contributor_keys.update(_pr_contributors(pr))
             if safe_pr["review_latency_days"] is not None and _in_window(first_review_at, since, until):
                 latency_values.append(float(safe_pr["review_latency_days"]))
             if state == "open":
@@ -1257,15 +1220,15 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
             author_object = commit.get("author")
             committer_object = commit.get("committer")
             if isinstance(author_object, Mapping):
-                contributor_keys.update(_ephemeral_identity_values(author_object))
+                contributor_keys.update(_identity_values(author_object))
             if isinstance(committer_object, Mapping):
-                contributor_keys.update(_ephemeral_identity_values(committer_object))
+                contributor_keys.update(_identity_values(committer_object))
             commit_author = commit_object.get("author") if isinstance(commit_object, Mapping) else None
             commit_committer = commit_object.get("committer") if isinstance(commit_object, Mapping) else None
             if isinstance(commit_author, Mapping):
-                contributor_keys.update(_ephemeral_identity_values(commit_author))
+                contributor_keys.update(_identity_values(commit_author))
             if isinstance(commit_committer, Mapping):
-                contributor_keys.update(_ephemeral_identity_values(commit_committer))
+                contributor_keys.update(_identity_values(commit_committer))
 
             timestamp = None
             for candidate in (
@@ -1327,9 +1290,8 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
             metrics["days_since_activity"] = max(0.0, (until - max(activity_dates)).total_seconds() / 86400)
         if open_ages:
             metrics["oldest_open_pr_days"] = round(max(open_ages), 3)
-        if aggregation_eligible:
-            metrics["active_contributors"] = len(contributor_keys)
-        contributor_keys.clear()
+        metrics["active_contributors"] = len(contributor_keys)
+        contributors_list = sorted(contributor_keys)
 
         completed_checks = sum(
             (
@@ -1376,15 +1338,11 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
                     }
                 }
             ),
+            "contributors": contributors_list,
             "evidence_refs": evidence_refs,
-            # Inline de-identified evidence makes the row inspectable even in
-            # a minimal test store; the evidence collection remains the normal
-            # query surface for the backend rules.
             "evidence_rows": evidence_rows,
         }
-        if aggregation_eligible:
-            # Keep the floor check auditable for model validation, while the
-            # public projection removes this internal team-size field.
+        if team_size is not None:
             activity_document["team_size"] = team_size
         _insert(self.db, self.collection_name, activity_document)
         counts.records_written += 1

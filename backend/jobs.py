@@ -16,8 +16,6 @@ from datetime import date, datetime, timedelta, timezone
 from math import ceil
 from typing import Any
 
-from beanie import PydanticObjectId
-
 from .config import Settings, get_settings
 from .db import get_active_repository
 from .ingestion import (
@@ -34,6 +32,7 @@ from .models import (
     WarningEvidenceItem,
     WarningSeverity,
     WeeklySnapshotDocument,
+    new_id,
 )
 from .resolvers import build_boundary_resolver, build_team_size_resolver
 from .rules import evaluate_mvp_rules
@@ -763,7 +762,7 @@ async def generate_weekly_snapshots(
 
         warning_documents: list[WarningDocument] = []
         triggered_count = sum(1 for result in results.values() if result.get("meets_minimum_data") and result.get("evidence"))
-        snapshot_id = PydanticObjectId()
+        snapshot_id = new_id()
         for rule_id, result in results.items():
             if not result.get("meets_minimum_data") or not result.get("evidence"):
                 continue
@@ -776,7 +775,7 @@ async def generate_weekly_snapshots(
             evidence = result["evidence"]
             warning_documents.append(
                 _document(WarningDocument,
-                    id=PydanticObjectId(),
+                    id=new_id(),
                     snapshot_id=snapshot_id,
                     project_id=project_id,
                     rule_id=rule_id,
@@ -795,7 +794,7 @@ async def generate_weekly_snapshots(
             )
 
         snapshot = _document(WeeklySnapshotDocument,
-            id=snapshot_id,
+            id=str(snapshot_id),
             project_id=project_id,
             week_start=week_start,
             week_end=week_end,

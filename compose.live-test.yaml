@@ -81,6 +81,7 @@ services:
       PHI_GITEA_TOKEN_FILE: /run/secrets/gitea_api_token
       PHI_PEOPLE_PORTAL_URL: http://people-portal-server:3000
       PHI_PEOPLE_PORTAL_API_TOKEN: project-health-local-service-token
+      PHI_AGENT_INGEST_TOKEN: project-health-local-agent-token
       PHI_AGGREGATION_FLOOR: "5"
       PHI_BACKFILL_WEEKS: "10"
       PHI_UPSTREAM_TIMEOUT_SECONDS: "120"

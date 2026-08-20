@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN_FILE = ROOT / ".live-test-token"
@@ -27,6 +29,7 @@ def configure() -> None:
         "PHI_GITEA_ORG": "appdev",
         "PHI_PEOPLE_PORTAL_URL": "http://127.0.0.1:3100",
         "PHI_PEOPLE_PORTAL_API_TOKEN": "project-health-local-service-token",
+        "PHI_AGENT_INGEST_TOKEN": "project-health-local-agent-token",
         "PHI_AGGREGATION_FLOOR": "5",
     }
     os.environ.update(values)
@@ -70,9 +73,29 @@ async def run() -> dict[str, Any]:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             health_response = await client.get("/health")
             latest_response = await client.get("/snapshots/latest")
+            spec = yaml.safe_load((ROOT / "fixtures/project-health-spec.yaml").read_text(encoding="utf-8"))
+            evidence = json.loads((ROOT / "fixtures/ci-evidence-week-3.json").read_text(encoding="utf-8"))
+            # Submit against a project sourced from the seeded People Portal catalog.
+            spec["project_id"] = "member-portal"
+            evidence["project_id"] = "member-portal"
+            ci_payload = {
+                "project_id": "member-portal",
+                "spec": spec,
+                "evidence": evidence,
+            }
+            ci_headers = {"Authorization": "Bearer project-health-local-agent-token"}
+            first_ci_response = await client.post("/ci/assessments", json=ci_payload, headers=ci_headers)
+            second_ci_response = await client.post("/ci/assessments", json=ci_payload, headers=ci_headers)
+            assessment_response = await client.get("/projects/member-portal/health-assessment")
         health_response.raise_for_status()
         latest_response.raise_for_status()
+        first_ci_response.raise_for_status()
+        second_ci_response.raise_for_status()
+        assessment_response.raise_for_status()
         latest = latest_response.json()
+        first_ci_result = first_ci_response.json()
+        second_ci_result = second_ci_response.json()
+        assessment_result = assessment_response.json()
 
         warning_rules = sorted({str(item.rule_id) for item in warnings})
         result = {
@@ -95,6 +118,8 @@ async def run() -> dict[str, Any]:
                 "health": health_response.json(),
                 "latest_projects": len(latest.get("projects", [])),
                 "snapshot_week_start": latest.get("snapshot_week_start"),
+                "ci_status": second_ci_result["assessment"]["status"],
+                "dashboard_assessment_status": assessment_result["assessment"]["status"],
             },
         }
 
@@ -117,6 +142,37 @@ async def run() -> dict[str, Any]:
         assert len(activity) >= 50, result
         assert len(latest.get("projects", [])) == 7, result
         assert "activity_decline" in warning_rules, result
+        assert first_ci_result["idempotent"] in {False, True}, result
+        assert second_ci_result["idempotent"] is True, result
+        assert first_ci_result["assessment"]["project_id"] == "member-portal", result
+        assert second_ci_result["assessment"] == first_ci_result["assessment"], result
+        submitted_assessment = second_ci_result["assessment"]
+        dashboard_assessment = assessment_result["assessment"]
+        assert dashboard_assessment is not None, result
+        assert {
+            "status": dashboard_assessment["status"],
+            "score": dashboard_assessment["score"],
+            "confidence": dashboard_assessment["confidence"],
+            "expected_week": dashboard_assessment["expectedWeek"],
+            "explanation": dashboard_assessment["explanation"],
+            "blockers": dashboard_assessment["blockers"],
+            "weekly_tasks": dashboard_assessment["recommendedWeeklyTasks"],
+            "assessment_id": dashboard_assessment["assessment_id"],
+            "spec_version": dashboard_assessment["spec_version"],
+            "commit_sha": dashboard_assessment["commit_sha"],
+        } == {
+            "status": submitted_assessment["status"],
+            "score": submitted_assessment["score"],
+            "confidence": submitted_assessment["confidence"],
+            "expected_week": submitted_assessment["expected_week"],
+            "explanation": submitted_assessment["summary"],
+            "blockers": submitted_assessment["blockers"],
+            "weekly_tasks": submitted_assessment["weekly_tasks"],
+            "assessment_id": submitted_assessment["assessment_id"],
+            "spec_version": submitted_assessment["spec_version"],
+            "commit_sha": submitted_assessment["commit_sha"],
+        }, result
+        assert dashboard_assessment["citations"], result
         return result
     finally:
         await close_db()

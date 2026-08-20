@@ -3,12 +3,26 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from beanie import PydanticObjectId
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from .auth import AuthUser, get_current_user, require_project_access, require_roles, visible_project_ids
+from .auth import AuthUser, get_ci_ingest_user, get_current_user, require_project_access, require_roles, visible_project_ids
+from .ci_agent import (
+    CIEvidence,
+    assessment_document,
+    assessment_payload,
+    normalize_spec,
+)
+from .ci_llm import (
+    LLMAssessor,
+    LLMSpecDecomposer,
+    assess_project_llm,
+    decompose_spec,
+)
 from .config import Settings, get_settings
+from .llm import OpenAIStructuredLLM, LLMUnavailable
 from .db import get_active_repository
 from .models import (
     AttentionStatus,
@@ -17,12 +31,15 @@ from .models import (
     BoundaryView,
     FeedbackCategory,
     FeedbackDocument,
+    HealthAssessmentView,
     ProjectResponse,
     PublicAggregateMetrics,
     RepositoryRef,
     Role,
     WarningDocument,
     WeeklySnapshotDocument,
+    PrivacySafeModel,
+    new_id,
 )
 from .rules import RULES
 
@@ -54,6 +71,63 @@ class BoundaryRequest(BaseModel):
     data_owner_user_id: str | None = None
 
 
+class CIAssessmentRequest(PrivacySafeModel):
+    project_id: str = Field(min_length=1, max_length=80)
+    spec: str | dict[str, Any]
+    spec_format: str | None = Field(default=None, max_length=20)
+    evidence: CIEvidence
+
+
+class DecomposeRequest(PrivacySafeModel):
+    """Request body for ``POST /projects/{id}/spec/decompose``.
+
+    The ``context`` field accepts free-form text from the tech lead describing
+    the project goals, delivery requirements, team constraints, and risks.  The
+    LLM produces a structured week-by-week plan from this; the result is
+    returned for review before the tech lead commits it to the repository.
+    """
+
+    context: str = Field(
+        min_length=1,
+        max_length=40_000,
+        description="Free-form project context from the tech lead (goals, milestones, constraints).",
+    )
+    lifecycle_weeks: int = Field(
+        default=12,
+        ge=1,
+        le=52,
+        description="Expected project duration in weeks.",
+    )
+
+
+def _get_assessor(settings: Settings) -> LLMAssessor | None:
+    """Build an ``LLMAssessor`` if LLM enrichment is configured, else ``None``."""
+    if not settings.llm_active:
+        return None
+    try:
+        llm = OpenAIStructuredLLM(
+            api_key=settings.openai_api_key,  # type: ignore[arg-type]
+            timeout_s=settings.llm_timeout_seconds,
+        )
+        return LLMAssessor(llm, model=settings.llm_assessment_model)
+    except LLMUnavailable:
+        return None
+
+
+def _get_decomposer(settings: Settings) -> LLMSpecDecomposer | None:
+    """Build an ``LLMSpecDecomposer`` if LLM enrichment is configured, else ``None``."""
+    if not settings.llm_active:
+        return None
+    try:
+        llm = OpenAIStructuredLLM(
+            api_key=settings.openai_api_key,  # type: ignore[arg-type]
+            timeout_s=min(settings.llm_timeout_seconds * 3, 120.0),
+        )
+        return LLMSpecDecomposer(llm, model=settings.llm_decomposition_model)
+    except LLMUnavailable:
+        return None
+
+
 def _id(value: Any) -> str:
     return str(value)
 
@@ -73,8 +147,6 @@ def _snapshot_id(snapshot: WeeklySnapshotDocument) -> str:
 
 
 async def _accessible_project(user: AuthUser, project_id: str) -> Any:
-    if not user.can_view_portfolio and project_id not in user.project_ids:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="project access denied")
     project = await _db().get_project(project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project not found")
@@ -83,6 +155,47 @@ async def _accessible_project(user: AuthUser, project_id: str) -> Any:
 
 async def _warnings_for(snapshot_id: str) -> list[WarningDocument]:
     return await _db().warnings_for_snapshot(snapshot_id)
+
+
+async def _assessment_for(project_id: str) -> Any:
+    return await _db().latest_assessment(project_id)
+
+
+async def _assessments_for(project_id: str) -> list[Any]:
+    rows = [row for row in await _db().list("assessments") if row.project_id == project_id]
+    rows.sort(key=lambda row: (row.created_at, row.assessment_id), reverse=True)
+    return rows
+
+
+def _assessment_view(document: Any) -> dict[str, Any] | None:
+    if document is None:
+        return None
+    citations: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for citation in [*getattr(document, "evidence_citations", []), *getattr(document, "spec_citations", [])]:
+        get_value = citation.get if isinstance(citation, dict) else lambda key, default=None: getattr(citation, key, default)
+        source_type = get_value("source_type", "ci")
+        source_id = get_value("source_id", "unknown")
+        source_field = get_value("source_field", "evidence")
+        reference = f"{source_type}:{source_id}:{source_field}"
+        if reference in seen:
+            continue
+        seen.add(reference)
+        citations.append({"label": f"{source_type} evidence", "reference": reference})
+    return HealthAssessmentView(
+        status=document.status.value,
+        score=document.score,
+        confidence=document.confidence,
+        expected_week=document.expected_week,
+        explanation=document.summary,
+        blockers=list(document.blockers),
+        recommended_weekly_tasks=list(document.weekly_tasks),
+        citations=citations,
+        assessment_id=document.assessment_id,
+        spec_version=document.spec_version,
+        commit_sha=document.commit_sha,
+        generated_at=document.created_at,
+    ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
 def _boundary_view(boundary: BoundaryDocument | None, project: Any) -> dict[str, Any]:
@@ -134,12 +247,13 @@ def _series_baselines(snapshot: WeeklySnapshotDocument) -> dict[str, list[Any]]:
 
 
 async def _project_response(project: Any, snapshot: WeeklySnapshotDocument | None) -> dict[str, Any]:
+    assessment = _assessment_view(await _assessment_for(project.project_id))
     if snapshot is None:
         status_value, status_class = "Insufficient data", "data"
         return ProjectResponse(
             id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team="Unassigned", repo="—",
             status=status_value, statusClass=status_class, signal="No snapshot available", signalDetail="Data is not yet sufficient for a trusted assessment.", lastActivity="—", trend="flat", weeks=[None] * 8,
-            flagFrom=99, seriesBaselines={"openPRs": [None, None], "reviewLatency": [None, None], "contributors": None}, series={"activity": [None] * 8, "openPRs": [None] * 8, "reviewLatency": [None] * 8, "contributors": None}, description="", boundary=BoundaryView(rootTeam="Unassigned", lifecycle=project.lifecycle_state.value), history=await _history(project.project_id), snapshot_id=None,
+            flagFrom=99, seriesBaselines={"openPRs": [None, None], "reviewLatency": [None, None], "contributors": None}, series={"activity": [None] * 8, "openPRs": [None] * 8, "reviewLatency": [None] * 8, "contributors": None}, description="", boundary=BoundaryView(rootTeam="Unassigned", lifecycle=project.lifecycle_state.value), history=await _history(project.project_id), snapshot_id=None, healthAssessment=assessment,
         ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
     status_value, status_class = _pretty_status(snapshot.attention_status)
@@ -156,7 +270,6 @@ async def _project_response(project: Any, snapshot: WeeklySnapshotDocument | Non
     baselines = PublicAggregateMetrics.from_metrics(snapshot.baselines).model_dump(mode="json", exclude_none=True) if snapshot.baselines else None
     series = snapshot.series or {"activity": [None] * 8, "open_prs": [None] * 8, "review_latency": [None] * 8, "contributors": [None] * 8}
     contributor_series = series.get("contributors", [None] * 8) if snapshot.metrics.active_contributors is not None else None
-    current_active_days = snapshot.metrics.active_days
     days_since_activity = snapshot.metrics.days_since_activity
     last_activity = "—" if days_since_activity is None else "Today" if days_since_activity == 0 else "Yesterday" if days_since_activity == 1 else f"{days_since_activity} days ago"
     first_warning = warnings[0].signal_name if warnings else ("Inactivity is expected" if snapshot.attention_status == AttentionStatus.PLANNED_PAUSE else "No current concern detected" if snapshot.attention_status == AttentionStatus.CLEAR else "Repository mapping incomplete" if snapshot.attention_status == AttentionStatus.INSUFFICIENT_DATA else "Review current project signals")
@@ -166,7 +279,7 @@ async def _project_response(project: Any, snapshot: WeeklySnapshotDocument | Non
     return ProjectResponse(
         id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team=boundary.root_authentik_team_id if boundary else "Unassigned", repo=boundary.primary_repos[0].repo_slug if boundary and boundary.primary_repos else "—",
         status=status_value, statusClass=status_class, signal=first_warning, signalDetail=detail, lastActivity=last_activity, trend="down" if status_class in {"risk", "watch"} else "flat", weeks=weeks,
-        flagFrom=5 if status_class == "risk" else 6 if status_class == "watch" else 99, seriesBaselines=_series_baselines(snapshot), series={"activity": series.get("activity", [None] * 8), "openPRs": series.get("openPRs", series.get("open_prs", [None] * 8)), "reviewLatency": series.get("review_latency", series.get("reviewLatency", series.get("review_latency_days", [None] * 8))), "contributors": contributor_series}, description="", boundary=_boundary_view(boundary, project), evidence=evidence, history=await _history(project.project_id), metrics=metrics, baselines=baselines, data_completeness_pct=snapshot.data_completeness_pct, last_sync_at=snapshot.last_sync_at, snapshot_id=_snapshot_id(snapshot),
+        flagFrom=5 if status_class == "risk" else 6 if status_class == "watch" else 99, seriesBaselines=_series_baselines(snapshot), series={"activity": series.get("activity", [None] * 8), "openPRs": series.get("openPRs", series.get("open_prs", [None] * 8)), "reviewLatency": series.get("review_latency", series.get("reviewLatency", series.get("review_latency_days", [None] * 8))), "contributors": contributor_series}, description="", boundary=_boundary_view(boundary, project), evidence=evidence, history=await _history(project.project_id), metrics=metrics, baselines=baselines, data_completeness_pct=snapshot.data_completeness_pct, last_sync_at=snapshot.last_sync_at, snapshot_id=_snapshot_id(snapshot), healthAssessment=assessment,
     ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
@@ -184,7 +297,8 @@ async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return {
         "status": "ok",
         "environment": settings.environment,
-        "mongo_configured": bool(settings.mongo_uri),
+        "database": "sqlite",
+        "sqlite_path": settings.sqlite_path,
         "directory_source": "people_portal" if settings.people_portal_url else "authentik" if settings.authentik_url else None,
         "people_portal_configured": bool(settings.people_portal_url),
         "outbound_notifications": False,
@@ -226,26 +340,33 @@ async def project_boundary(project_id: str, user: AuthUser = Depends(require_pro
     return {"project_id": project_id, "boundary": _boundary_view(boundary, project)}
 
 
+@router.get("/projects/{project_id}/health-assessment")
+async def project_health_assessment(project_id: str, user: AuthUser = Depends(require_project_access)) -> dict[str, Any]:
+    await _accessible_project(user, project_id)
+    return {"project_id": project_id, "assessment": _assessment_view(await _assessment_for(project_id))}
+
+
 @router.post("/feedback", status_code=status.HTTP_201_CREATED)
 async def create_feedback(request: FeedbackRequest, user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
     await _accessible_project(user, request.project_id)
     try:
-        snapshot_oid = PydanticObjectId(request.snapshot_id)
-    except Exception as exc:
+        uuid.UUID(request.snapshot_id)
+    except (ValueError, AttributeError) as exc:
         raise HTTPException(status_code=422, detail="snapshot_id is invalid") from exc
     snapshot = await _db().snapshot_by_id(request.snapshot_id)
-    if snapshot is None or snapshot.project_id != request.project_id or snapshot_oid != snapshot.id:
+    if snapshot is None or snapshot.project_id != request.project_id or request.snapshot_id != str(snapshot.id):
         raise HTTPException(status_code=404, detail="snapshot not found for project")
-    warning_oid = None
+    warning_str_id = None
     if request.warning_id:
         try:
-            warning_oid = PydanticObjectId(request.warning_id)
-        except Exception as exc:
+            uuid.UUID(request.warning_id)
+        except (ValueError, AttributeError) as exc:
             raise HTTPException(status_code=422, detail="warning_id is invalid") from exc
         warning = await _db().warning_by_id(request.warning_id)
-        if warning is None or warning.snapshot_id != snapshot.id:
+        if warning is None or str(warning.snapshot_id) != str(snapshot.id):
             raise HTTPException(status_code=404, detail="warning not found for snapshot")
-    feedback = FeedbackDocument.model_construct(id=PydanticObjectId(), snapshot_id=snapshot.id, warning_id=warning_oid, project_id=request.project_id, author_user_id=user.subject, category=request.category, note=request.note, created_at=datetime.now(timezone.utc))
+        warning_str_id = request.warning_id
+    feedback = FeedbackDocument.model_construct(id=new_id(), snapshot_id=str(snapshot.id), warning_id=warning_str_id, project_id=request.project_id, author_user_id=user.subject, category=request.category, note=request.note, created_at=datetime.now(timezone.utc))
     await _db().add("feedback", feedback)
     audit = AuditLogDocument.model_construct(actor_user_id=user.subject, action="feedback.created", target_type="feedback", target_id=_id(feedback.id), after={"project_id": request.project_id, "snapshot_id": request.snapshot_id, "warning_id": request.warning_id, "category": request.category.value}, at=datetime.now(timezone.utc))
     await _db().add("audit_log", audit)
@@ -253,23 +374,16 @@ async def create_feedback(request: FeedbackRequest, user: AuthUser = Depends(get
 
 
 @router.get("/audit")
-async def audit_log(project_id: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=500), user: AuthUser = Depends(get_current_user)) -> list[dict[str, Any]]:
+async def audit_log(project_id: str | None = Query(default=None), limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, Any]]:
     rows = list(await _db().list("audit_log"))
-    if not user.can_view_portfolio:
-        visible = set(user.project_ids)
-        rows = [row for row in rows if (row.after or {}).get("project_id") in visible]
     if project_id:
-        if not user.can_view_portfolio and project_id not in user.project_ids:
-            raise HTTPException(status_code=403, detail="project access denied")
         rows = [row for row in rows if (row.after or {}).get("project_id") == project_id]
     rows.sort(key=lambda row: row.at, reverse=True)
-    return [{"id": _id(row.id), "actor_user_id": "Reviewer" if not user.is_admin else row.actor_user_id, "action": row.action, "target_type": row.target_type, "target_id": row.target_id, "before": row.before, "after": row.after, "at": row.at} for row in rows[:limit]]
+    return [{"id": _id(row.id), "actor_user_id": row.actor_user_id, "action": row.action, "target_type": row.target_type, "target_id": row.target_id, "before": row.before, "after": row.after, "at": row.at} for row in rows[:limit]]
 
 
 @router.get("/rules")
-async def rules(settings: Settings = Depends(get_settings), user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
-    if not user.can_view_portfolio and not user.project_ids:
-        raise HTTPException(status_code=403, detail="insufficient role")
+async def rules(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     descriptions = {
         "activity_decline": ("Activity decline", "active days fall below the trailing median", "watch"),
         "open_pr_aging": ("Open PR aging", "oldest open PR exceeds the trailing 75th percentile", "at_risk"),
@@ -279,6 +393,136 @@ async def rules(settings: Settings = Depends(get_settings), user: AuthUser = Dep
         "contributor_resilience": ("Contributor resilience", "aggregate active contributor count falls below the trailing 25th percentile", "watch"),
     }
     return {"rule_set_version": settings.rule_set_version, "rules": [{"rule_id": rule_id, "version": settings.rule_set_version, "signal_name": descriptions.get(rule_id, (rule_id, "", "watch"))[0], "description": descriptions.get(rule_id, ("", "", ""))[1], "minimum_data": "at least 4 trailing observations", "threshold": descriptions.get(rule_id, ("", "", ""))[1], "severity": descriptions.get(rule_id, ("", "", "watch"))[2], "status": "Active"} for rule_id in RULES]}
+
+
+async def _submit_ci_assessment(request: CIAssessmentRequest, user: AuthUser) -> dict[str, Any]:
+    await _accessible_project(user, request.project_id)
+    if request.evidence.project_id != request.project_id:
+        raise HTTPException(status_code=422, detail="project_id does not match evidence.project_id")
+    try:
+        spec = normalize_spec(request.spec, project_id=request.project_id, source_format=request.spec_format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    database = _db()
+    # Idempotency: return the existing assessment for the same commit without re-running
+    all_assessments = await database.list("assessments")
+    existing = next(
+        (row for row in all_assessments
+         if row.project_id == request.project_id
+         and row.commit_sha == request.evidence.commit_sha),
+        None,
+    )
+    if existing is not None:
+        return {"idempotent": True, "assessment": assessment_payload(existing)}
+
+    # Fetch the last 4 assessments to supply as history for the LLM
+    prior = sorted(
+        [row for row in all_assessments if row.project_id == request.project_id],
+        key=lambda r: (r.expected_week, r.created_at),
+        reverse=True,
+    )[:4]
+
+    try:
+        settings = get_settings()
+        assessment = await assess_project_llm(
+            spec,
+            request.evidence,
+            assessor=_get_assessor(settings),
+            history=prior,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    document = assessment_document(assessment)
+    await database.add("assessments", document)
+    return {"idempotent": False, "assessment": assessment_payload(document)}
+
+
+@router.post("/ci/assessments", status_code=status.HTTP_201_CREATED)
+async def submit_ci_assessment(request: CIAssessmentRequest, user: AuthUser = Depends(get_ci_ingest_user)) -> dict[str, Any]:
+    return await _submit_ci_assessment(request, user)
+
+
+@router.post("/ci/evidence", status_code=status.HTTP_201_CREATED)
+async def submit_ci_evidence(request: CIAssessmentRequest, user: AuthUser = Depends(get_ci_ingest_user)) -> dict[str, Any]:
+    return await _submit_ci_assessment(request, user)
+
+
+@router.get("/projects/{project_id}/assessments")
+async def project_assessments(project_id: str, user: AuthUser = Depends(require_project_access)) -> dict[str, Any]:
+    await _accessible_project(user, project_id)
+    rows = await _assessments_for(project_id)
+    return {"project_id": project_id, "assessments": [assessment_payload(row) for row in rows]}
+
+
+@router.get("/projects/{project_id}/assessments/latest")
+async def latest_project_assessment(project_id: str, user: AuthUser = Depends(require_project_access)) -> dict[str, Any]:
+    await _accessible_project(user, project_id)
+    rows = await _assessments_for(project_id)
+    latest = rows[0] if rows else None
+    return {"project_id": project_id, "assessment": assessment_payload(latest) if latest else None}
+
+
+@router.get("/projects/{project_id}/weekly-tasks")
+async def project_weekly_tasks(project_id: str, week: int | None = Query(default=None, ge=1, le=52), user: AuthUser = Depends(require_project_access)) -> dict[str, Any]:
+    await _accessible_project(user, project_id)
+    rows = await _assessments_for(project_id)
+    latest = rows[0] if rows else None
+    tasks = latest.weekly_tasks if latest and (week is None or latest.expected_week == week) else []
+    return {"project_id": project_id, "week": week if week is not None else (latest.expected_week if latest else None), "tasks": tasks, "assessment_id": latest.assessment_id if latest else None}
+
+
+@router.post("/projects/{project_id}/spec/decompose", status_code=status.HTTP_200_OK)
+async def decompose_project_spec(
+    project_id: str,
+    request: DecomposeRequest,
+    user: AuthUser = Depends(require_roles(Role.ADMIN, Role.PORTFOLIO_LEADER)),
+) -> dict[str, Any]:
+    """Decompose free-form project context into a structured week-by-week spec.
+
+    This is a **kickoff-time** operation, intended to run once when a project
+    starts.  The tech lead provides free-form context (goals, milestones,
+    constraints); the LLM produces a structured plan the CI agent can score
+    against every week.
+
+    The response includes the generated spec for review.  The tech lead should
+    commit the spec to the repository before submitting CI assessments, so the
+    ``spec_version`` is stable across all submissions for the project lifetime.
+
+    When ``PHI_LLM_ENABLED`` is ``false`` or ``PHI_ANTHROPIC_API_KEY`` is
+    absent, the context is treated as a Markdown spec and parsed directly.
+    """
+    await _accessible_project(user, project_id)
+    settings = get_settings()
+    decomposer = _get_decomposer(settings)
+    try:
+        spec = await decompose_spec(
+            request.context,
+            project_id=project_id,
+            lifecycle_weeks=request.lifecycle_weeks,
+            decomposer=decomposer,
+        )
+    except (ValueError, LLMUnavailable) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "project_id": project_id,
+        "spec_version": spec.version,
+        "lifecycle_weeks": spec.lifecycle_weeks,
+        "llm_generated": decomposer is not None,
+        "chunk_count": len(spec.chunks),
+        "weeks": sorted(
+            {(c.week_start, c.week_end) for c in spec.chunks},
+            key=lambda w: w[0],
+        ),
+        "spec": {
+            "project_id": spec.project_id,
+            "version": spec.version,
+            "lifecycle_weeks": spec.lifecycle_weeks,
+            "chunks": [c.model_dump(mode="json") for c in spec.chunks],
+        },
+    }
 
 
 @router.get("/boundaries")

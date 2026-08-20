@@ -1,11 +1,9 @@
 """Synchronous staging writes and the fold into modelled activity rows.
 
 The pull-only adapters in ``backend.ingestion`` write synchronously: their
-``sync()`` methods are plain functions and ``_insert`` never awaits.  Handing
-them a Motor collection therefore creates a coroutine that is discarded before
-it runs, and nothing is persisted.  They are given a blocking pymongo handle
-here instead, which is a natural fit because ingestion runs as a batch job
-outside the request loop.
+``sync()`` methods are plain functions and ``_insert`` never awaits.  The
+in-memory staging store is a natural fit because ingestion runs as a batch
+job outside the async request loop.
 
 Raw staging rows keep their source shape -- ``open_prs`` is a list of
 de-identified pull requests, and the scalars live under ``metrics`` -- so they
@@ -20,9 +18,8 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timezone
 from typing import Any
 
-from beanie import PydanticObjectId
-
-from .config import Settings, get_settings
+from .config import Settings
+from .models import new_id
 from .ingestion import (
     AUTHENTIK_TEAMS_COLLECTION,
     GITEA_REPOS_COLLECTION,
@@ -60,7 +57,7 @@ class InMemoryStagingStore:
     def clear(self) -> None:
         self._collections.clear()
 
-    def close(self) -> None:  # pragma: no cover - symmetry with the Mongo store
+    def close(self) -> None:  # pragma: no cover
         return None
 
 
@@ -75,37 +72,8 @@ class _InMemoryCollection:
         return list(self._rows)
 
 
-class MongoStagingStore:
-    """Blocking pymongo handle over the raw staging collections."""
-
-    def __init__(self, settings: Settings | None = None) -> None:
-        resolved = settings or get_settings()
-        if not resolved.mongo_uri:
-            raise ValueError("a Mongo URI is required for the staging store")
-        from pymongo import MongoClient
-
-        self._client: Any = MongoClient(
-            resolved.mongo_uri,
-            serverSelectionTimeoutMS=resolved.mongo_server_selection_timeout_ms,
-        )
-        self._database = self._client[resolved.mongo_database]
-
-    def __getitem__(self, name: str) -> Any:
-        return self._database[name]
-
-    async def list_staging(self, collection: str) -> list[Mapping[str, Any]]:
-        return list(self._database[collection].find({}))
-
-    def close(self) -> None:
-        self._client.close()
-
-
 def open_staging_store(settings: Settings | None = None) -> Any:
-    """Return the staging store matching the configured persistence mode."""
-
-    resolved = settings or get_settings()
-    if resolved.mongo_uri:
-        return MongoStagingStore(resolved)
+    """Return the process-wide in-memory staging store."""
     return _local_staging_store
 
 
@@ -156,23 +124,11 @@ def _as_float(value: Any) -> float | None:
 
 
 def _build_activity_document(fields: Mapping[str, Any]) -> RepoActivityDocument:
-    """Build an activity document, validating whenever Beanie is initialized.
-
-    Full pydantic validation requires a live collection, which the local
-    in-memory mode deliberately does not have.  Validation is therefore used
-    where it is available and the codebase's ``model_construct`` convention is
-    the fallback; the field coercion above already clamps every value to the
-    model's declared bounds on both paths.
-    """
+    """Build and validate a RepoActivityDocument from raw staging fields."""
 
     payload = dict(fields)
-    payload.setdefault("id", PydanticObjectId())
-    try:
-        return RepoActivityDocument.__pydantic_validator__.validate_python(payload)
-    except Exception as error:  # noqa: BLE001 - narrow re-raise below
-        if isinstance(error, (TypeError, ValueError)) and "Collection" not in type(error).__name__:
-            raise
-        return RepoActivityDocument.model_construct(**payload)
+    payload.setdefault("id", new_id())
+    return RepoActivityDocument.model_validate(payload)
 
 
 def _activity_key(project_id: str, repo_slug: str, window_start: date) -> tuple[str, str, str]:
@@ -209,6 +165,13 @@ def _documents_for_row(row: Mapping[str, Any]) -> list[RepoActivityDocument]:
     synced_at = _as_datetime(row.get("synced_at")) or datetime.now(timezone.utc)
     last_sync_at = _as_datetime(row.get("last_sync_at")) or synced_at
 
+    raw_contributors = row.get("contributors")
+    contributors: list[str] = (
+        [str(c) for c in raw_contributors if c]
+        if isinstance(raw_contributors, (list, tuple))
+        else []
+    )
+
     fields: dict[str, Any] = {
         "gitea_repo_id": str(row.get("gitea_repo_id") or repo_slug),
         "repo_slug": str(repo_slug),
@@ -224,15 +187,15 @@ def _documents_for_row(row: Mapping[str, Any]) -> list[RepoActivityDocument]:
         "merged_count": _as_int(metrics.get("merged_count")),
         "aggregation_floor": _as_int(row.get("aggregation_floor")),
         "data_completeness_pct": _as_float(row.get("data_completeness_pct")),
+        "contributors": contributors,
     }
 
-    # Contributor counts survive the fold only when ingestion already cleared
-    # the floor gate and recorded the team size alongside them.
-    if row.get("aggregation_eligible") and isinstance(row.get("team_size"), int):
-        contributors = _as_int(metrics.get("active_contributors"))
-        if contributors is not None:
-            fields["active_contributors"] = contributors
-            fields["team_size"] = int(row["team_size"])
+    # Always store contributor count and team size when available.
+    active_contributors = _as_int(metrics.get("active_contributors"))
+    if active_contributors is not None:
+        fields["active_contributors"] = active_contributors
+    if isinstance(row.get("team_size"), int):
+        fields["team_size"] = int(row["team_size"])
 
     project_ids = row.get("project_ids")
     if not isinstance(project_ids, (list, tuple)) or not project_ids:
@@ -342,7 +305,7 @@ async def fold_people_portal_catalog(database: Any, staging: Any) -> dict[str, A
             lifecycle = LifecycleState.NEW
         owner = row.get("data_owner_user_id") or None
         project = ProjectDocument.model_construct(
-            id=getattr(existing_projects.get(project_id), "id", None) or PydanticObjectId(),
+            id=getattr(existing_projects.get(project_id), "id", None) or new_id(),
             project_id=project_id,
             display_name=str(row.get("display_name") or project_id),
             lifecycle_state=lifecycle,
@@ -368,7 +331,7 @@ async def fold_people_portal_catalog(database: Any, staging: Any) -> dict[str, A
         boundary_key = (project_id, effective_from)
         existing_boundary = existing_boundaries.get(boundary_key)
         boundary = BoundaryDocument.model_construct(
-            id=getattr(existing_boundary, "id", None) or PydanticObjectId(),
+            id=getattr(existing_boundary, "id", None) or new_id(),
             project_id=project_id,
             root_authentik_team_id=str(row.get("root_team_id")),
             included_subteam_ids=[str(item) for item in row.get("included_subteam_ids", [])],
@@ -404,7 +367,6 @@ __all__ = [
     "REPO_ACTIVITY_STAGING_COLLECTION",
     "STAGING_COLLECTIONS",
     "InMemoryStagingStore",
-    "MongoStagingStore",
     "open_staging_store",
     "fold_staging_activity",
     "fold_people_portal_catalog",

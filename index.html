@@ -10,6 +10,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
+    <script>
+      // Points the deployed Vercel frontend at the Render-hosted API.
+      // Update this if the Render service is renamed or moves to a custom domain.
+      window.PHI_API_BASE = 'https://app-dev-horizon-api.onrender.com';
+    </script>
   </head>
   <body>
     <div class="app-shell">
@@ -52,7 +57,7 @@
       <section class="feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title">
         <button class="modal-close" id="modal-close" aria-label="Close feedback dialog">×</button>
         <div class="modal-icon" data-icon="message"></div>
-        <span class="eyebrow">Weekly review note</span>
+        <span class="eyebrow">Project context</span>
         <h2 id="feedback-title">Add context to this warning</h2>
         <p id="feedback-project-name">Tell the team what leadership should know about this project.</p>
         <div class="feedback-options" id="feedback-options">

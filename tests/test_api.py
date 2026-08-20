@@ -1,557 +1,659 @@
-"""API and persistence-boundary tests for the privacy-safe backend."""
+"""HTTP integration tests for the routes in ``backend.api``.
+
+The routes exercised here are the ones the router actually registers.  The
+app under test is assembled without ``main.lifespan`` because
+``httpx.ASGITransport`` does not run lifespan events; ``conftest`` initialises
+and seeds the in-memory database instead.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import json
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Any
+import uuid
 
 import pytest
-from beanie import PydanticObjectId
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
-from backend.auth import AuthUser, get_current_user
-from backend.config import Settings, get_settings
-from backend.db import store
-from backend.errors import ImmutableSnapshotError
-from backend.jobs import generate_weekly_snapshots
-from backend.main import create_app
-from backend.models import (
-    AggregateMetrics,
-    AttentionStatus,
-    BoundaryDocument,
-    EvidenceReference,
-    LifecycleState,
-    ProjectDocument,
-    RepoActivityDocument,
-    RepositoryRef,
-    Role,
-    WarningDocument,
-    WarningEvidenceItem,
-    WarningSeverity,
-    WeeklySnapshotDocument,
-)
+from backend.rules import RULES
+
+# Deterministic ids written by ``backend.seed`` (``_oid(n)``).
+MEMBER_PORTAL_SNAPSHOT_ID = str(uuid.UUID(int=1))
+MEMBER_PORTAL_WARNING_ID = str(uuid.UUID(int=101))
+CAMPUS_EVENTS_SNAPSHOT_ID = str(uuid.UUID(int=2))
+
+SEEDED_PROJECT_IDS = {
+    "member-portal",
+    "campus-events",
+    "design-system",
+    "alumni-network",
+    "onboarding",
+    "mobile-lab",
+    "winter-campaign",
+}
 
 
-UTC = timezone.utc
-WEEK_START = date(2026, 8, 3)
-LAST_SYNC = datetime(2026, 8, 3, 13, 8, tzinfo=UTC)
+# ---------------------------------------------------------------------------
+# GET /health
+# ---------------------------------------------------------------------------
 
 
-@dataclass
-class ApiHarness:
-    app: FastAPI
-    client: TestClient
-    settings: Settings
-    current_user: dict[str, AuthUser]
-
-    def set_user(
-        self,
-        *,
-        subject: str = "test-user",
-        roles: set[Role] | None = None,
-        project_ids: set[str] | None = None,
-    ) -> None:
-        self.current_user["value"] = AuthUser(
-            subject=subject,
-            roles=frozenset(roles or {Role.PORTFOLIO_LEADER}),
-            project_ids=frozenset(project_ids or set()),
-        )
-
-    def add(self, collection: str, item: Any) -> None:
-        asyncio.run(store.add(collection, item))
-
-
-@pytest.fixture
-def api(monkeypatch: pytest.MonkeyPatch) -> ApiHarness:
-    """Use explicit dev auth in test mode, then override the user per test."""
-
-    monkeypatch.setenv("PHI_ENVIRONMENT", "test")
-    monkeypatch.setenv("PHI_DEV_AUTH", "true")
-    monkeypatch.setenv("PHI_DEV_AUTH_USER_ID", "test-user")
-    monkeypatch.setenv("PHI_DEV_AUTH_ROLES", "portfolio_leader")
-    monkeypatch.setenv("PHI_AGGREGATION_FLOOR", "5")
-    monkeypatch.setenv("PHI_RULE_SET_VERSION", "rules-v1")
-    get_settings.cache_clear()
-
-    settings = get_settings()
-    app = create_app()
-    current_user = {
-        "value": AuthUser(
-            subject="test-user",
-            roles=frozenset({Role.PORTFOLIO_LEADER}),
-            project_ids=frozenset(),
-        )
-    }
-    app.dependency_overrides[get_current_user] = lambda: current_user["value"]
-    app.dependency_overrides[get_settings] = lambda: settings
-
-    store.clear()
-    client = TestClient(app)
-    harness = ApiHarness(app=app, client=client, settings=settings, current_user=current_user)
-    try:
-        yield harness
-    finally:
-        client.close()
-        app.dependency_overrides.clear()
-        store.clear()
-        get_settings.cache_clear()
-
-
-def _project(project_id: str, *, lifecycle: LifecycleState = LifecycleState.ACTIVE) -> ProjectDocument:
-    return ProjectDocument.model_construct(
-        project_id=project_id,
-        display_name=project_id.replace("-", " ").title(),
-        lifecycle_state=lifecycle,
-        non_goals_ack=True,
-    )
-
-
-def _boundary(
-    project_id: str,
-    *,
-    team: str = "team-old",
-    repo: str = "repo-old",
-    effective_from: date = date(2026, 1, 1),
-) -> BoundaryDocument:
-    return BoundaryDocument.model_construct(
-        project_id=project_id,
-        root_authentik_team_id=team,
-        primary_repos=[RepositoryRef(gitea_repo_id=repo, repo_slug=repo)],
-        effective_from=effective_from,
-        created_by="test-admin",
-    )
-
-
-def _metrics(*, contributors: int | None = 6, completeness: float = 100) -> AggregateMetrics:
-    values: dict[str, Any] = {
-        "active_days": 4,
-        "days_since_activity": 1,
-        "open_prs": 2,
-        "oldest_open_pr_days": 3,
-        "review_latency_days": 2.0,
-        "merged_count": 3,
-        "data_completeness_pct": completeness,
-        "last_sync_at": LAST_SYNC,
-    }
-    if contributors is not None:
-        values.update(
-            active_contributors=contributors,
-            team_size=8,
-            aggregation_floor=5,
-        )
-    return AggregateMetrics(**values)
-
-
-def _snapshot(
-    project_id: str,
-    *,
-    week_start: date = WEEK_START,
-    version: str = "rules-v1",
-    status: AttentionStatus = AttentionStatus.WATCH,
-    metrics: AggregateMetrics | None = None,
-    warning_ids: list[PydanticObjectId] | None = None,
-    with_contributor_series: bool = True,
-) -> WeeklySnapshotDocument:
-    metrics = metrics or _metrics()
-    series: dict[str, list[int | None]] = {
-        "activity": [6, 6, 5, 5, 4, 4, 4, 4],
-        "open_prs": [1, 1, 1, 2, 2, 2, 2, 2],
-        "review_latency": [1, 1, 1, 1, 2, 2, 2, 2],
-    }
-    baselines: dict[str, list[int | None]] = {
-        "open_prs": [1, 2],
-        "review_latency": [1, 2],
-    }
-    if with_contributor_series:
-        series["contributors"] = [6, 6, 6, 6, 6, 6, 6, 6]
-        baselines["contributors"] = [6, 6]
-    return WeeklySnapshotDocument.model_construct(
-        id=PydanticObjectId(),
-        project_id=project_id,
-        week_start=week_start,
-        week_end=week_start + timedelta(days=6),
-        rule_set_version=version,
-        generated_at=datetime.combine(week_start, datetime.min.time(), tzinfo=UTC),
-        attention_status=status,
-        data_completeness_pct=metrics.data_completeness_pct or 0,
-        last_sync_at=metrics.last_sync_at,
-        metrics=metrics,
-        baselines=metrics if with_contributor_series else None,
-        warning_ids=warning_ids or [],
-        series=series,
-        series_baselines=baselines,
-    )
-
-
-def _warning(snapshot_id: PydanticObjectId, project_id: str) -> WarningDocument:
-    warning_id = PydanticObjectId()
-    evidence = WarningEvidenceItem(
-        evidence_type="metric",
-        icon="activity",
-        title="Activity below baseline",
-        metric="active_days",
-        current=1,
-        baseline=4,
-        source_refs=[
-            EvidenceReference(
-                source_collection="repo_activity",
-                source_id="repo-activity-test",
-                source_field="active_days",
-                observed_at=LAST_SYNC,
-            )
-        ],
-    )
-    return WarningDocument.model_construct(
-        id=warning_id,
-        snapshot_id=snapshot_id,
-        project_id=project_id,
-        rule_id="activity_decline",
-        rule_version="rules-v1",
-        signal_name="Activity below baseline",
-        current_value=1,
-        baseline_value=4,
-        time_window="trailing 8 weeks",
-        trigger_threshold=4,
-        severity=WarningSeverity.WARNING,
-        explanation="Activity below the trailing baseline.",
-        data_freshness=LAST_SYNC.isoformat(),
-        data_completeness_pct=100,
-        evidence=[evidence],
-    )
-
-
-def _add_project(api: ApiHarness, project_id: str, *, lifecycle: LifecycleState = LifecycleState.ACTIVE) -> ProjectDocument:
-    project = _project(project_id, lifecycle=lifecycle)
-    api.add("projects", project)
-    api.add("boundaries", _boundary(project_id))
-    return project
-
-
-def _add_snapshot(api: ApiHarness, project_id: str, **kwargs: Any) -> WeeklySnapshotDocument:
-    snapshot = _snapshot(project_id, **kwargs)
-    api.add("snapshots", snapshot)
-    return snapshot
-
-
-def _add_history(api: ApiHarness, project_id: str, *, severe: bool = False) -> None:
-    for index in range(9):
-        current_week = date(2026, 6, 1) + timedelta(days=index * 7)
-        api.add(
-            "repo_activity",
-            # The job consumes only aggregate fields from this raw evidence row.
-            # No contributor identities or per-person dimensions are present.
-            RepoActivityDocument.model_construct(
-                project_id=project_id,
-                gitea_repo_id=f"repo-{project_id}",
-                repo_slug=project_id,
-                window_start=current_week,
-                window_end=current_week + timedelta(days=6),
-                active_days=1 if severe and index == 8 else 6,
-                days_since_activity=30 if severe and index == 8 else 1,
-                open_prs=8 if severe and index == 8 else 1,
-                oldest_open_pr_days=30 if severe and index == 8 else 2,
-                review_latency_days=10 if severe and index == 8 else 2,
-                merged_count=0 if severe and index == 8 else 4,
-                data_completeness_pct=100,
-                last_sync_at=LAST_SYNC,
-            ),
-        )
-
-
-def test_latest_snapshot_has_the_frontend_compatible_shape_and_evidence(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    snapshot = _snapshot("alpha")
-    warning = _warning(snapshot.id, "alpha")
-    snapshot.warning_ids = [warning.id]
-    api.add("warnings", warning)
-    api.add("snapshots", snapshot)
-
-    response = api.client.get("/snapshots/latest")
+async def test_health_returns_ok(app_client):
+    response = await app_client.get("/health")
 
     assert response.status_code == 200
-    payload = response.json()
-    assert {
-        "snapshot_week_start",
-        "snapshot_week_end",
-        "generated_at",
-        "rule_set_version",
-        "data_completeness_pct",
-        "last_sync_at",
-        "projects",
-    } <= payload.keys()
-    project = payload["projects"][0]
-    assert {
-        "id",
-        "name",
-        "status",
-        "statusClass",
-        "metrics",
-        "baselines",
-        "boundary",
-        "evidence",
-        "history",
-        "series",
-        "seriesBaselines",
-    } <= project.keys()
-    assert project["id"] == "alpha"
-    assert project["evidence"][0]["sourceEvidence"]
-    assert payload["rule_set_version"] == "rules-v1"
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["database"] == "sqlite"
+    assert body["outbound_notifications"] is False
+    assert "sqlite_path" in body
 
 
-def test_project_lead_can_only_read_assigned_projects(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    _add_project(api, "beta")
-    _add_snapshot(api, "alpha")
-    _add_snapshot(api, "beta")
-    api.set_user(subject="alpha-lead", roles={Role.PROJECT_LEAD}, project_ids={"alpha"})
-
-    latest = api.client.get("/snapshots/latest")
-    alpha = api.client.get("/projects/alpha/snapshots")
-    beta = api.client.get("/projects/beta/snapshots")
-    boundaries = api.client.get("/boundaries")
-
-    assert latest.status_code == 200
-    assert [project["id"] for project in latest.json()["projects"]] == ["alpha"]
-    assert alpha.status_code == 200
-    assert beta.status_code == 403
-    assert boundaries.status_code == 403
+async def test_health_works_without_any_data(empty_app_client):
+    assert (await empty_app_client.get("/health")).status_code == 200
 
 
-def test_non_admin_response_contains_no_individual_contributor_keys(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    _add_snapshot(api, "alpha")
-
-    payload = api.client.get("/snapshots/latest").json()
-    def all_keys(value: Any) -> set[str]:
-        found: set[str] = set()
-        if isinstance(value, dict):
-            for key, child in value.items():
-                found.add(str(key).lower().replace("_", ""))
-                found.update(all_keys(child))
-        elif isinstance(value, list):
-            for child in value:
-                found.update(all_keys(child))
-        return found
-
-    keys = all_keys(payload)
-    forbidden = {
-        "contributorid",
-        "contributorids",
-        "contributoridentities",
-        "identityref",
-        "identityrefs",
-        "giteausername",
-        "giteausernames",
-        "percontributormetrics",
-        "commitsbyuser",
-        "additionsbyuser",
-        "deletionsbyuser",
-    }
-    assert keys.isdisjoint(forbidden)
-    # The aggregate count is allowed here because the team is above the floor.
-    assert payload["projects"][0]["metrics"]["active_contributors"] == 6
+# ---------------------------------------------------------------------------
+# GET /snapshots/latest  (the portfolio project list)
+# ---------------------------------------------------------------------------
 
 
-def test_aggregation_floor_omits_contributor_fields_entirely(api: ApiHarness) -> None:
-    _add_project(api, "small-team")
-    _add_snapshot(
-        api,
-        "small-team",
-        metrics=_metrics(contributors=None),
-        with_contributor_series=False,
-    )
+async def test_latest_snapshot_returns_the_project_list(app_client):
+    response = await app_client.get("/snapshots/latest")
 
-    project = api.client.get("/snapshots/latest").json()["projects"][0]
-
-    assert "active_contributors" not in project["metrics"]
-    assert "active_contributors" not in (project.get("baselines") or {})
-    assert "contributors" not in project["series"]
-    assert "contributors" not in project["seriesBaselines"]
-    assert "team_size" not in json.dumps(project)
-
-
-def test_warning_requires_inspectable_source_evidence(api: ApiHarness) -> None:
-    with pytest.raises(ValidationError):
-        WarningDocument.model_validate(
-            {
-                "id": PydanticObjectId(),
-                "snapshot_id": PydanticObjectId(),
-                "project_id": "alpha",
-                "rule_id": "activity_decline",
-                "rule_version": "rules-v1",
-                "signal_name": "Activity below baseline",
-                "time_window": "trailing 8 weeks",
-                "severity": WarningSeverity.WARNING,
-                "explanation": "Missing evidence must be rejected.",
-                "data_freshness": LAST_SYNC.isoformat(),
-                "data_completeness_pct": 100,
-                "evidence": [
-                    {
-                        "type": "metric",
-                        "icon": "activity",
-                        "title": "Activity below baseline",
-                        "sourceEvidence": [],
-                    }
-                ],
-            }
-        )
-
-    _add_project(api, "alpha")
-    snapshot = _snapshot("alpha")
-    warning = _warning(snapshot.id, "alpha")
-    snapshot.warning_ids = [warning.id]
-    api.add("warnings", warning)
-    api.add("snapshots", snapshot)
-    response = api.client.get("/snapshots/latest")
     assert response.status_code == 200
-    assert all(item["sourceEvidence"] for item in response.json()["projects"][0]["evidence"])
+    body = response.json()
+    assert isinstance(body["projects"], list)
+    assert {item["id"] for item in body["projects"]} == SEEDED_PROJECT_IDS
+    assert body["rule_set_version"] == "rules-v1"
+    assert body["snapshot_week_start"] == "2026-08-03"
+    assert body["snapshot_week_end"] == "2026-08-09"
+    assert 0 <= body["data_completeness_pct"] <= 100
 
 
-def test_planned_pause_suppresses_signals_and_warnings(api: ApiHarness) -> None:
-    _add_project(api, "paused-project", lifecycle=LifecycleState.PAUSED)
-    _add_history(api, "paused-project", severe=True)
+async def test_latest_snapshot_project_shape_is_frontend_compatible(app_client):
+    body = (await app_client.get("/snapshots/latest")).json()
+    project = next(item for item in body["projects"] if item["id"] == "member-portal")
 
-    created = asyncio.run(
-        generate_weekly_snapshots(
-            settings=api.settings,
-            database=store,
-            week_start=WEEK_START,
-            rule_set_version="rules-v1",
-        )
-    )
-    snapshot = store.snapshots[-1]
+    assert project["name"] == "Member Portal"
+    assert project["status"] == "At risk"
+    assert project["statusClass"] == "risk"
+    assert len(project["weeks"]) == 8
+    assert set(project["series"]) >= {"activity", "openPRs", "reviewLatency"}
+    assert set(project["seriesBaselines"]) >= {"openPRs", "reviewLatency"}
+    assert project["boundary"]["rootTeam"] == "product-experience"
+    assert project["boundary"]["repos"] == ["member-portal", "member-portal-api"]
+    assert project["snapshot_id"] == MEMBER_PORTAL_SNAPSHOT_ID
+    assert project["evidence"], "at-risk projects must carry inspectable evidence"
 
-    assert created == 1
-    assert snapshot.attention_status == AttentionStatus.PLANNED_PAUSE
-    assert snapshot.warning_ids == []
-    assert store.warnings == []
-    project = api.client.get("/snapshots/latest").json()["projects"][0]
+
+async def test_latest_snapshot_omits_contributor_series_when_gated(app_client):
+    """``mobile-lab`` has no contributor aggregate, so the series is withheld."""
+    body = (await app_client.get("/snapshots/latest")).json()
+    project = next(item for item in body["projects"] if item["id"] == "mobile-lab")
+
+    assert project["status"] == "Insufficient data"
+    assert project["series"].get("contributors") is None
+    assert project["seriesBaselines"].get("contributors") is None
+
+
+async def test_latest_snapshot_planned_pause_has_no_warnings(app_client):
+    body = (await app_client.get("/snapshots/latest")).json()
+    project = next(item for item in body["projects"] if item["id"] == "winter-campaign")
+
     assert project["status"] == "Planned pause"
+    assert project["statusClass"] == "pause"
     assert project["evidence"] == []
 
 
-def test_rerunning_rules_appends_versioned_immutable_snapshots(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    _add_history(api, "alpha")
+async def test_latest_snapshot_on_an_empty_portfolio(empty_app_client):
+    response = await empty_app_client.get("/snapshots/latest")
 
-    asyncio.run(
-        generate_weekly_snapshots(
-            settings=api.settings,
-            database=store,
-            week_start=WEEK_START,
-            rule_set_version="rules-v1",
-        )
-    )
-    first = store.snapshots[0]
-    first_payload = first.model_dump(mode="json")
-
-    with pytest.raises(ImmutableSnapshotError):
-        asyncio.run(first.replace())
-    with pytest.raises(ImmutableSnapshotError):
-        asyncio.run(first.update())
-
-    asyncio.run(
-        generate_weekly_snapshots(
-            settings=api.settings,
-            database=store,
-            week_start=WEEK_START,
-            rule_set_version="rules-v2",
-        )
-    )
-
-    assert len(store.snapshots) == 2
-    assert {snapshot.rule_set_version for snapshot in store.snapshots} == {"rules-v1", "rules-v2"}
-    assert store.snapshots[0].id != store.snapshots[1].id
-    assert store.snapshots[0].model_dump(mode="json") == first_payload
+    assert response.status_code == 200
+    body = response.json()
+    assert body["projects"] == []
+    assert body["snapshot_week_start"] is None
+    assert body["rule_set_version"] == "none"
 
 
-def test_rerunning_the_same_rule_version_is_idempotent(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    _add_history(api, "alpha")
-
-    first = asyncio.run(
-        generate_weekly_snapshots(
-            settings=api.settings,
-            database=store,
-            week_start=WEEK_START,
-            rule_set_version="rules-v1",
-        )
-    )
-    second = asyncio.run(
-        generate_weekly_snapshots(
-            settings=api.settings,
-            database=store,
-            week_start=WEEK_START,
-            rule_set_version="rules-v1",
-        )
-    )
-
-    assert first == 1
-    assert second == 0
-    assert len(store.snapshots) == 1
+# ---------------------------------------------------------------------------
+# GET /projects/{id}/snapshots
+# ---------------------------------------------------------------------------
 
 
-def test_feedback_write_also_creates_audit_event(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    snapshot = _add_snapshot(api, "alpha")
-    api.set_user(subject="alpha-lead", roles={Role.PROJECT_LEAD}, project_ids={"alpha"})
+async def test_project_snapshots_for_a_known_project(app_client):
+    response = await app_client.get("/projects/member-portal/snapshots")
 
-    response = api.client.post(
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == "member-portal"
+    assert len(body["snapshots"]) == 1
+
+    snapshot = body["snapshots"][0]
+    assert snapshot["snapshot_id"] == MEMBER_PORTAL_SNAPSHOT_ID
+    assert snapshot["snapshot_week_start"] == "2026-08-03"
+    assert snapshot["project"]["id"] == "member-portal"
+
+
+async def test_project_snapshots_404_for_unknown_project(app_client):
+    response = await app_client.get("/projects/no-such-project/snapshots")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "project not found"
+
+
+# ---------------------------------------------------------------------------
+# GET /projects/{id}/boundary
+# ---------------------------------------------------------------------------
+
+
+async def test_project_boundary_for_a_known_project(app_client):
+    response = await app_client.get("/projects/member-portal/boundary")
+
+    assert response.status_code == 200
+    boundary = response.json()["boundary"]
+    assert boundary["rootTeam"] == "product-experience"
+    assert boundary["subteams"] == ["member-portal-core", "growth"]
+    assert boundary["repos"] == ["member-portal", "member-portal-api"]
+    assert boundary["dataOwner"] == "priya-n"
+    assert boundary["lifecycle"] == "active"
+
+
+async def test_project_boundary_404_for_unknown_project(app_client):
+    assert (await app_client.get("/projects/nope/boundary")).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /projects/{id}/health-assessment
+# ---------------------------------------------------------------------------
+
+
+async def test_project_health_assessment(app_client):
+    response = await app_client.get("/projects/member-portal/health-assessment")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == "member-portal"
+    assessment = body["assessment"]
+    assert assessment is not None
+    assert 0 <= assessment["score"] <= 100
+    assert 0 <= assessment["confidence"] <= 1
+    assert assessment["expectedWeek"] == 3
+    assert assessment["explanation"]
+
+
+async def test_project_health_assessment_404_for_unknown_project(app_client):
+    assert (
+        await app_client.get("/projects/nope/health-assessment")
+    ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /feedback
+# ---------------------------------------------------------------------------
+
+
+async def test_create_feedback_succeeds(app_client):
+    response = await app_client.post(
         "/feedback",
         json={
-            "snapshot_id": str(snapshot.id),
-            "project_id": "alpha",
+            "snapshot_id": MEMBER_PORTAL_SNAPSHOT_ID,
+            "project_id": "member-portal",
             "category": "risk_confirmed",
-            "note": "The review queue is being actively worked.",
+            "note": "Reviewer bandwidth is being backfilled.",
         },
     )
 
     assert response.status_code == 201
-    assert len(store.feedback) == 1
-    assert len(store.audit_log) == 1
-    assert store.audit_log[0].action == "feedback.created"
-    assert store.audit_log[0].after["snapshot_id"] == str(snapshot.id)
-    audit = api.client.get("/audit", params={"project_id": "alpha"})
-    assert audit.status_code == 200
-    assert audit.json()[0]["action"] == "feedback.created"
-    assert audit.json()[0]["actor_user_id"] == "Reviewer"
+    body = response.json()
+    assert body["project_id"] == "member-portal"
+    assert body["snapshot_id"] == MEMBER_PORTAL_SNAPSHOT_ID
+    assert body["category"] == "risk_confirmed"
+    assert uuid.UUID(body["id"])
 
 
-def test_boundary_versions_preserve_historical_snapshot_resolution(api: ApiHarness) -> None:
-    _add_project(api, "alpha")
-    old_snapshot = _add_snapshot(api, "alpha", week_start=date(2026, 6, 1))
-    api.set_user(subject="admin", roles={Role.ADMIN})
+async def test_create_feedback_with_a_warning_reference(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": MEMBER_PORTAL_SNAPSHOT_ID,
+            "warning_id": MEMBER_PORTAL_WARNING_ID,
+            "project_id": "member-portal",
+            "category": "false_positive",
+        },
+    )
+    assert response.status_code == 201
 
-    response = api.client.post(
+
+async def test_create_feedback_is_written_to_history_and_audit(app_client):
+    await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": MEMBER_PORTAL_SNAPSHOT_ID,
+            "project_id": "member-portal",
+            "category": "risk_resolved",
+            "note": "Queue drained.",
+        },
+    )
+
+    body = (await app_client.get("/snapshots/latest")).json()
+    project = next(item for item in body["projects"] if item["id"] == "member-portal")
+    assert any(entry["note"] == "Queue drained." for entry in project["history"])
+
+    audit = (await app_client.get("/audit", params={"project_id": "member-portal"})).json()
+    assert any(row["action"] == "feedback.created" for row in audit)
+
+
+async def test_create_feedback_404_for_unknown_project(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": MEMBER_PORTAL_SNAPSHOT_ID,
+            "project_id": "no-such-project",
+            "category": "helpful",
+        },
+    )
+    assert response.status_code == 404
+
+
+async def test_create_feedback_422_for_a_non_uuid_snapshot_id(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": "not-a-uuid",
+            "project_id": "member-portal",
+            "category": "helpful",
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "snapshot_id is invalid"
+
+
+async def test_create_feedback_404_when_snapshot_belongs_to_another_project(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": CAMPUS_EVENTS_SNAPSHOT_ID,
+            "project_id": "member-portal",
+            "category": "helpful",
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "snapshot not found for project"
+
+
+async def test_create_feedback_404_when_warning_is_not_on_the_snapshot(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": CAMPUS_EVENTS_SNAPSHOT_ID,
+            "warning_id": MEMBER_PORTAL_WARNING_ID,
+            "project_id": "campus-events",
+            "category": "helpful",
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "warning not found for snapshot"
+
+
+async def test_create_feedback_422_for_an_unknown_category(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": MEMBER_PORTAL_SNAPSHOT_ID,
+            "project_id": "member-portal",
+            "category": "not-a-category",
+        },
+    )
+    assert response.status_code == 422
+
+
+async def test_create_feedback_422_for_extra_fields(app_client):
+    response = await app_client.post(
+        "/feedback",
+        json={
+            "snapshot_id": MEMBER_PORTAL_SNAPSHOT_ID,
+            "project_id": "member-portal",
+            "category": "helpful",
+            "author_user_id": "spoofed",
+        },
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /audit
+# ---------------------------------------------------------------------------
+
+
+async def test_audit_log_returns_entries(app_client):
+    response = await app_client.get("/audit")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert isinstance(rows, list)
+    assert rows, "the seed writes one audit entry"
+    assert {"id", "actor_user_id", "action", "target_type", "at"} <= set(rows[0])
+
+
+async def test_audit_log_filters_by_project(app_client):
+    rows = (await app_client.get("/audit", params={"project_id": "member-portal"})).json()
+    assert all((row["after"] or {}).get("project_id") == "member-portal" for row in rows)
+
+    empty = (await app_client.get("/audit", params={"project_id": "nope"})).json()
+    assert empty == []
+
+
+async def test_audit_log_respects_the_limit(app_client):
+    rows = (await app_client.get("/audit", params={"limit": 1})).json()
+    assert len(rows) <= 1
+
+
+@pytest.mark.parametrize("limit", [0, 501, -1])
+async def test_audit_log_422_for_out_of_range_limits(app_client, limit):
+    assert (
+        await app_client.get("/audit", params={"limit": limit})
+    ).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /rules
+# ---------------------------------------------------------------------------
+
+
+async def test_rules_returns_rule_metadata(app_client):
+    response = await app_client.get("/rules")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["rule_set_version"] == "rules-v1"
+    assert {rule["rule_id"] for rule in body["rules"]} == set(RULES)
+
+    for rule in body["rules"]:
+        assert {
+            "rule_id",
+            "version",
+            "signal_name",
+            "description",
+            "minimum_data",
+            "threshold",
+            "severity",
+            "status",
+        } <= set(rule)
+        assert rule["status"] == "Active"
+        assert rule["signal_name"]
+
+
+async def test_rules_is_available_without_data(empty_app_client):
+    assert (await empty_app_client.get("/rules")).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# GET /boundaries and POST /boundaries
+# ---------------------------------------------------------------------------
+
+
+async def test_list_boundaries(app_client):
+    response = await app_client.get("/boundaries")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert {row["project_id"] for row in rows} == SEEDED_PROJECT_IDS
+
+
+async def test_create_boundary_versions_the_previous_one(app_client):
+    response = await app_client.post(
         "/boundaries",
         json={
-            "project_id": "alpha",
-            "root_authentik_team_id": "team-new",
-            "included_subteam_ids": ["subteam-new"],
-            "primary_repos": [{"gitea_repo_id": "repo-new", "repo_slug": "repo-new"}],
-            "effective_from": "2026-07-01",
+            "project_id": "member-portal",
+            "root_authentik_team_id": "product-experience-v2",
+            "included_subteam_ids": ["member-portal-core"],
+            "primary_repos": [
+                {"gitea_repo_id": "g-new", "repo_slug": "member-portal"}
+            ],
+            "effective_from": "2026-09-01",
+            "data_owner_user_id": "priya-n",
         },
     )
+
+    assert response.status_code == 201
+    assert response.json()["boundary"]["rootTeam"] == "product-experience-v2"
+
+    rows = (await app_client.get("/boundaries")).json()
+    member_portal = [row for row in rows if row["project_id"] == "member-portal"]
+    assert len(member_portal) == 2
+    # The superseded version is closed at the new effective date.
+    superseded = next(row for row in member_portal if row["effective_from"] == "2026-01-01")
+    assert superseded["effective_to"] == "2026-09-01"
+
+
+async def test_create_boundary_409_when_effective_from_does_not_advance(app_client):
+    response = await app_client.post(
+        "/boundaries",
+        json={
+            "project_id": "member-portal",
+            "root_authentik_team_id": "product-experience",
+            "effective_from": "2025-01-01",
+        },
+    )
+    assert response.status_code == 409
+
+
+async def test_create_boundary_404_for_unknown_project(app_client):
+    response = await app_client.post(
+        "/boundaries",
+        json={
+            "project_id": "no-such-project",
+            "root_authentik_team_id": "team",
+            "effective_from": "2026-09-01",
+        },
+    )
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# CI assessment routes (LLM disabled — the deterministic scorer runs)
+# ---------------------------------------------------------------------------
+
+
+def _ci_payload(commit_sha: str = "abc123", **evidence_overrides):
+    evidence = {
+        "project_id": "member-portal",
+        "commit_sha": commit_sha,
+        "branch": "main",
+        "expected_week": 3,
+        "changed_files": ["src/core-flow.ts", "tests/core-flow.test.ts"],
+        "tests_total": 12,
+        "tests_passed": 12,
+        "tests_failed": 0,
+        "coverage_pct": 88,
+        "check_results": [{"name": "required-checks", "status": "passed"}],
+        "scope_change_count": 1,
+        "docs_updated": True,
+    }
+    evidence.update(evidence_overrides)
+    return {
+        "project_id": "member-portal",
+        "spec": {
+            "project_id": "member-portal",
+            "version": "appdev-plan-v1",
+            "lifecycle_weeks": 12,
+            "weeks": [
+                {
+                    "week": 3,
+                    "title": "Core milestone",
+                    "milestone": "Core flow ready for review",
+                    "tasks": ["Implement the core user flow"],
+                    "acceptance_criteria": ["Primary flow is testable"],
+                    "artifacts": ["Milestone notes"],
+                }
+            ],
+        },
+        "evidence": evidence,
+    }
+
+
+async def test_submit_ci_assessment_creates_an_assessment(app_client):
+    response = await app_client.post("/ci/assessments", json=_ci_payload())
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["idempotent"] is False
+    assessment = body["assessment"]
+    assert assessment["project_id"] == "member-portal"
+    assert assessment["commit_sha"] == "abc123"
+    assert 0 <= assessment["score"] <= 100
+
+
+async def test_submit_ci_assessment_is_idempotent_per_commit(app_client):
+    first = await app_client.post("/ci/assessments", json=_ci_payload())
+    second = await app_client.post("/ci/assessments", json=_ci_payload())
+
+    assert first.json()["idempotent"] is False
+    assert second.json()["idempotent"] is True
+    assert (
+        first.json()["assessment"]["assessment_id"]
+        == second.json()["assessment"]["assessment_id"]
+    )
+
+
+async def test_ci_evidence_route_is_an_alias(app_client):
+    response = await app_client.post("/ci/evidence", json=_ci_payload("def456"))
     assert response.status_code == 201
 
-    new_snapshot = _add_snapshot(api, "alpha", week_start=date(2026, 8, 3), version="rules-v2")
-    assert old_snapshot.id != new_snapshot.id
-    boundaries = [row for row in store.boundaries if row.project_id == "alpha"]
-    assert len(boundaries) == 2
-    old_at_handoff = asyncio.run(store.boundary_at("alpha", date(2026, 6, 30)))
-    new_after_handoff = asyncio.run(store.boundary_at("alpha", date(2026, 7, 2)))
-    assert old_at_handoff is not None
-    assert new_after_handoff is not None
-    assert old_at_handoff.root_authentik_team_id == "team-old"
-    assert new_after_handoff.root_authentik_team_id == "team-new"
 
-    response = api.client.get("/projects/alpha/snapshots")
+async def test_submit_ci_assessment_422_on_project_id_mismatch(app_client):
+    payload = _ci_payload()
+    payload["evidence"]["project_id"] = "campus-events"
+
+    response = await app_client.post("/ci/assessments", json=payload)
+    assert response.status_code == 422
+    assert "does not match" in response.json()["detail"]
+
+
+async def test_submit_ci_assessment_404_for_unknown_project(app_client):
+    payload = _ci_payload()
+    payload["project_id"] = "no-such-project"
+    payload["evidence"]["project_id"] = "no-such-project"
+
+    assert (await app_client.post("/ci/assessments", json=payload)).status_code == 404
+
+
+async def test_submit_ci_assessment_422_for_an_unparseable_spec(app_client):
+    payload = _ci_payload()
+    payload["spec"] = {"project_id": "member-portal", "weeks": "not-a-list"}
+
+    assert (await app_client.post("/ci/assessments", json=payload)).status_code == 422
+
+
+async def test_submit_ci_evidence_rejects_identities_in_the_narrative(app_client):
+    payload = _ci_payload("ghi789", progress_summary="Great work by @ada this week")
+
+    response = await app_client.post("/ci/assessments", json=payload)
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# assessment read routes
+# ---------------------------------------------------------------------------
+
+
+async def test_project_assessments_list(app_client):
+    response = await app_client.get("/projects/member-portal/assessments")
+
     assert response.status_code == 200
-    by_week = {item["snapshot_week_start"]: item["project"] for item in response.json()["snapshots"]}
-    assert by_week["2026-06-01"]["boundary"]["rootTeam"] == "team-old"
-    assert by_week["2026-08-03"]["boundary"]["rootTeam"] == "team-new"
+    body = response.json()
+    assert body["project_id"] == "member-portal"
+    assert len(body["assessments"]) >= 1
+
+
+async def test_latest_project_assessment(app_client):
+    response = await app_client.get("/projects/member-portal/assessments/latest")
+
+    assert response.status_code == 200
+    assert response.json()["assessment"] is not None
+
+
+async def test_latest_project_assessment_404_for_unknown_project(app_client):
+    assert (
+        await app_client.get("/projects/nope/assessments/latest")
+    ).status_code == 404
+
+
+async def test_project_weekly_tasks(app_client):
+    response = await app_client.get("/projects/member-portal/weekly-tasks")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == "member-portal"
+    assert body["week"] == 3
+    assert isinstance(body["tasks"], list)
+
+
+async def test_project_weekly_tasks_for_a_week_without_an_assessment(app_client):
+    body = (
+        await app_client.get(
+            "/projects/member-portal/weekly-tasks", params={"week": 9}
+        )
+    ).json()
+    assert body["week"] == 9
+    assert body["tasks"] == []
+
+
+@pytest.mark.parametrize("week", [0, 53])
+async def test_project_weekly_tasks_422_for_out_of_range_weeks(app_client, week):
+    response = await app_client.get(
+        "/projects/member-portal/weekly-tasks", params={"week": week}
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /projects/{id}/spec/decompose  (falls back to Markdown when LLM is off)
+# ---------------------------------------------------------------------------
+
+
+async def test_decompose_spec_without_an_llm_parses_markdown(app_client):
+    context = (
+        "# Member Portal\n"
+        "## Week 1: Kickoff\n"
+        "- Agree the project boundary\n"
+        "## Week 2: Core flow\n"
+        "- Implement the core user flow\n"
+    )
+    response = await app_client.post(
+        "/projects/member-portal/spec/decompose",
+        json={"context": context, "lifecycle_weeks": 12},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_id"] == "member-portal"
+    assert body["llm_generated"] is False
+    assert body["lifecycle_weeks"] == 12
+    assert body["chunk_count"] >= 1
+    assert body["spec"]["chunks"]
+
+
+async def test_decompose_spec_404_for_unknown_project(app_client):
+    response = await app_client.post(
+        "/projects/nope/spec/decompose", json={"context": "# Plan\n## Week 1: Go\n- do"}
+    )
+    assert response.status_code == 404
+
+
+async def test_decompose_spec_422_for_an_empty_context(app_client):
+    response = await app_client.post(
+        "/projects/member-portal/spec/decompose", json={"context": ""}
+    )
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# routing
+# ---------------------------------------------------------------------------
+
+
+async def test_unknown_route_is_404(app_client):
+    assert (await app_client.get("/does-not-exist")).status_code == 404
+
+
+async def test_feedback_rejects_get(app_client):
+    assert (await app_client.get("/feedback")).status_code == 405

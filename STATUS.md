@@ -53,6 +53,18 @@ Four defects found while connecting this path were fixed rather than worked arou
 
 ## Explicit stubs and assumptions
 
+### CI/RAG v1
+
+The additive CI agent is locally runnable and deterministic. It intentionally
+does not infer completion from changed files alone: milestone/acceptance claims
+must be present in the structured evidence contract and are cited in the result.
+The optional summarizer interface is fail-closed to the deterministic assessment.
+
+The optional dashboard ingest configuration uses the canonical
+`PHI_AGENT_INGEST_TOKEN` secret name. The GitHub Actions workflow passes it to
+the existing CLI `--token` option; local live-stack tests continue to use their
+existing mock token.
+
 - Local development uses an in-memory repository and deterministic demo fixtures. Beanie/Motor initialization, document indexes, and a repository facade for the API/jobs are present for Mongo deployments; the local path is the verified path in this repository.
 - Authentik OIDC JWT validation is implemented for configured production settings; local mode requires the explicit `PHI_DEV_AUTH=true` switch.
 - Authentik/ Gitea sync adapters are pull-only and injectable. Upstream API URLs, organization details, and the hosting scheduler are deployment configuration, not hard-coded defaults. The Gitea organization is now read from `PHI_GITEA_ORG` through `Settings` rather than a bare environment lookup inside the job.

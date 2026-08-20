@@ -160,26 +160,9 @@ async def build_team_size_resolver(
 
 
 async def _list_staging(database: Any, collection: str) -> list[Mapping[str, Any]]:
-    """Read a raw staging collection through whichever store is configured."""
+    """Read a raw staging collection via its ``list_staging`` method."""
 
-    lister = getattr(database, "list_staging", None)
-    if callable(lister):
-        return list(await lister(collection))
-    try:
-        handle = database[collection]
-    except (KeyError, TypeError, ValueError):
-        return []
-    finder = getattr(handle, "find", None)
-    if finder is None:
-        return []
-    cursor = finder({})
-    to_list = getattr(cursor, "to_list", None)
-    if to_list is not None:
-        rows = to_list(length=None)
-        if hasattr(rows, "__await__"):
-            rows = await rows
-        return list(rows)
-    return list(cursor)
+    return list(await database.list_staging(collection))
 
 
 __all__ = ["build_boundary_resolver", "build_team_size_resolver"]

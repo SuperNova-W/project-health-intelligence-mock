@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .admin import router as admin_router
 from .api import router
 from .config import get_settings
 from .db import close_db, init_db
@@ -14,7 +15,6 @@ from .seed import seed_demo_data
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    settings.assert_oidc_configured()
     await init_db(settings)
     await seed_demo_data()
     yield
@@ -24,8 +24,19 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:4173", "http://localhost:4173"], allow_credentials=True, allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["Authorization", "Content-Type"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://127.0.0.1:4173",
+            "http://localhost:4173",
+            "https://project-health-intelligence-mock.vercel.app",
+        ],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
     app.include_router(router)
+    app.include_router(admin_router)
     return app
 
 

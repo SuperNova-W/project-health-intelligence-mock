@@ -6,27 +6,28 @@ from datetime import date, datetime, timezone
 from enum import StrEnum
 from typing import Any, ClassVar, Literal
 
-from beanie import Document, PydanticObjectId
+import uuid
+
 from pydantic import (
     AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
-    StringConstraints,
     computed_field,
     model_validator,
 )
-from pymongo import ASCENDING, IndexModel
 
 from .errors import EvidenceTraceError, ImmutableSnapshotError, PrivacyViolationError
 
 
-PROJECT_SLUG = StringConstraints(
-    strip_whitespace=True,
-    min_length=1,
-    max_length=80,
-    pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
-)
+DocumentId = str
+
+
+def new_id() -> str:
+    """Generate a new random document ID."""
+    return str(uuid.uuid4())
+
+
 ProjectId = str
 
 
@@ -34,45 +35,10 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _normalized_key(value: str) -> str:
-    return "".join(character for character in value.lower() if character.isalnum())
+_FORBIDDEN_PRIVACY_KEYS: set[str] = set()  # Identity storage enabled; no keys are blocked.
 
 
-_FORBIDDEN_PRIVACY_KEYS = {
-    "contributoridentity",
-    "contributoridentities",
-    "authoridentityref",
-    "authoridentity",
-    "giteausername",
-    "giteausernames",
-    "percontributormetrics",
-    "perpersonmetrics",
-    "commitsbyuser",
-    "additionsbyuser",
-    "deletionsbyuser",
-    "commitsbycontributor",
-    "additionsbycontributor",
-    "deletionsbycontributor",
-    "identitymap",
-}
-
-
-def _find_forbidden_privacy_key(value: Any, path: str = "payload") -> str | None:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = _normalized_key(str(key))
-            if normalized in _FORBIDDEN_PRIVACY_KEYS:
-                return f"{path}.{key}"
-            if "perperson" in normalized or "bycontributor" in normalized:
-                return f"{path}.{key}"
-            nested = _find_forbidden_privacy_key(child, f"{path}.{key}")
-            if nested:
-                return nested
-    elif isinstance(value, (list, tuple, set)):
-        for index, child in enumerate(value):
-            nested = _find_forbidden_privacy_key(child, f"{path}[{index}]")
-            if nested:
-                return nested
+def _find_forbidden_privacy_key(value: Any, path: str = "payload") -> str | None:  # noqa: ARG001
     return None
 
 
@@ -146,8 +112,10 @@ class Role(StrEnum):
     PROJECT_LEAD = "project_lead"
 
 
-class PHIDocument(Document):
-    """Common Beanie document configuration."""
+class PHIDocument(BaseModel):
+    """Common persisted-document base (pure Pydantic, no ODM dependency)."""
+
+    id: DocumentId | None = Field(default=None)
 
     model_config = ConfigDict(
         extra="forbid",
@@ -222,7 +190,6 @@ class ProjectDocument(PHIDocument):
 
     class Settings:
         name = "projects"
-        indexes = [IndexModel([("project_id", ASCENDING)], unique=True)]
 
     def scoring_decision(self, week_start: date, week_end: date) -> ScoringDecision:
         """Short-circuit pause/lifecycle state before any rule evaluation."""
@@ -267,12 +234,6 @@ class BoundaryDocument(PHIDocument):
 
     class Settings:
         name = "boundaries"
-        indexes = [
-            IndexModel(
-                [("project_id", ASCENDING), ("effective_from", ASCENDING)],
-                name="boundaries_project_effective_from",
-            ),
-        ]
 
     @model_validator(mode="after")
     def validate_range(self) -> "BoundaryDocument":
@@ -287,15 +248,10 @@ class BoundaryDocument(PHIDocument):
 
 
 class IdentityMapDocument(PHIDocument):
-    """Privacy guard collection; individual identity mappings are prohibited.
+    """Records that contributor identity storage is enabled for this deployment."""
 
-    The collection remains present so deployments can explicitly record that
-    identity mapping is disabled. It intentionally has no username, user-id,
-    or identity-reference fields.
-    """
-
-    record_type: Literal["aggregate_only_guard"] = "aggregate_only_guard"
-    mapping_enabled: Literal[False] = False
+    record_type: Literal["identity_enabled"] = "identity_enabled"
+    mapping_enabled: bool = True
     created_at: datetime = Field(default_factory=utc_now)
 
     class Settings:
@@ -303,7 +259,7 @@ class IdentityMapDocument(PHIDocument):
 
 
 class AggregateMetrics(PrivacySafeModel):
-    """Repository/project aggregates. No contributor-level dimensions exist."""
+    """Repository/project aggregates including named contributor lists."""
 
     active_days: int | None = Field(default=None, ge=0)
     days_since_activity: int | None = Field(default=None, ge=0)
@@ -312,39 +268,25 @@ class AggregateMetrics(PrivacySafeModel):
     review_latency_days: float | None = Field(default=None, ge=0)
     merged_count: int | None = Field(default=None, ge=0)
     active_contributors: int | None = Field(default=None, ge=0)
+    contributors: list[str] = Field(default_factory=list)
     team_size: int | None = Field(default=None, ge=0)
     aggregation_floor: int | None = Field(default=None, ge=1)
     data_completeness_pct: float | None = Field(default=None, ge=0, le=100)
     last_sync_at: datetime | None = None
 
-    @model_validator(mode="after")
-    def enforce_aggregation_floor(self) -> "AggregateMetrics":
-        if self.active_contributors is None:
-            return self
-        if self.team_size is None:
-            raise PrivacyViolationError(
-                "active_contributors requires an explicit aggregate team_size"
-            )
-        from .config import get_settings
-
-        floor = max(self.aggregation_floor or 0, get_settings().aggregation_floor)
-        if self.team_size < floor:
-            raise PrivacyViolationError(
-                "active_contributors cannot be stored below the configured aggregation floor"
-            )
-        if self.active_contributors > self.team_size:
-            raise ValueError("active_contributors cannot exceed team_size")
-        return self
-
     def public_dump(self) -> dict[str, Any]:
         payload = super().public_dump()
-        payload.pop("team_size", None)
-        payload.pop("aggregation_floor", None)
+        # ``PublicAggregateMetrics`` is the response projection and forbids
+        # extra keys, so every internal-only field must be dropped here:
+        # the floor itself plus the two inputs it gates (the contributor
+        # roster and the exact team size).
+        for internal_field in ("aggregation_floor", "contributors", "team_size"):
+            payload.pop(internal_field, None)
         return payload
 
 
 class RepoActivityDocument(PHIDocument):
-    """Append-only, aggregate-only raw evidence for one repository sync window."""
+    """Append-only raw evidence for one repository sync window, including named contributors."""
 
     project_id: ProjectId | None = Field(
         default=None,
@@ -364,6 +306,7 @@ class RepoActivityDocument(PHIDocument):
     review_latency_days: float | None = Field(default=None, ge=0)
     merged_count: int | None = Field(default=None, ge=0)
     active_contributors: int | None = Field(default=None, ge=0)
+    contributors: list[str] = Field(default_factory=list)
     team_size: int | None = Field(default=None, ge=0)
     aggregation_floor: int | None = Field(default=None, ge=1)
     data_completeness_pct: float | None = Field(default=None, ge=0, le=100)
@@ -371,26 +314,11 @@ class RepoActivityDocument(PHIDocument):
 
     class Settings:
         name = "repo_activity"
-        indexes = [
-            IndexModel(
-                [("project_id", ASCENDING), ("window_start", ASCENDING)],
-                name="repo_activity_project_window",
-            ),
-            IndexModel(
-                [("repo_slug", ASCENDING), ("synced_at", ASCENDING)],
-                name="repo_activity_repo_synced",
-            ),
-        ]
 
     @model_validator(mode="after")
-    def validate_window_and_floor(self) -> "RepoActivityDocument":
+    def validate_window(self) -> "RepoActivityDocument":
         if self.window_end < self.window_start:
             raise ValueError("window_end must be on or after window_start")
-        AggregateMetrics(
-            active_contributors=self.active_contributors,
-            team_size=self.team_size,
-            aggregation_floor=self.aggregation_floor,
-        )
         return self
 
     def aggregate_metrics(self) -> AggregateMetrics:
@@ -402,6 +330,7 @@ class RepoActivityDocument(PHIDocument):
             review_latency_days=self.review_latency_days,
             merged_count=self.merged_count,
             active_contributors=self.active_contributors,
+            contributors=list(self.contributors),
             team_size=self.team_size,
             aggregation_floor=self.aggregation_floor,
             data_completeness_pct=self.data_completeness_pct,
@@ -466,23 +395,12 @@ class WeeklySnapshotDocument(PHIDocument):
     last_sync_at: datetime | None = None
     metrics: AggregateMetrics
     baselines: AggregateMetrics | None = None
-    warning_ids: list[PydanticObjectId] = Field(default_factory=list, max_length=100)
+    warning_ids: list[DocumentId] = Field(default_factory=list, max_length=100)
     series: dict[str, list[float | int | None]] = Field(default_factory=dict)
     series_baselines: dict[str, list[float | int | None]] = Field(default_factory=dict)
 
     class Settings:
         name = "weekly_snapshots"
-        indexes = [
-            IndexModel(
-                [("project_id", ASCENDING), ("week_start", ASCENDING)],
-                name="snapshots_project_week_start",
-            ),
-            IndexModel(
-                [("project_id", ASCENDING), ("week_start", ASCENDING), ("rule_set_version", ASCENDING)],
-                unique=True,
-                name="snapshots_project_week_rule_version",
-            ),
-        ]
 
     @model_validator(mode="after")
     def validate_window(self) -> "WeeklySnapshotDocument":
@@ -493,9 +411,7 @@ class WeeklySnapshotDocument(PHIDocument):
         return self
 
     async def save(self, *args: Any, **kwargs: Any) -> Any:
-        if self.id is not None:
-            raise ImmutableSnapshotError("weekly snapshots are immutable")
-        return await super().save(*args, **kwargs)
+        raise ImmutableSnapshotError("weekly snapshots are immutable; use the repository to insert")
 
     async def replace(self, *args: Any, **kwargs: Any) -> Any:
         raise ImmutableSnapshotError("weekly snapshots are immutable")
@@ -508,7 +424,7 @@ class WeeklySnapshotDocument(PHIDocument):
 
 
 class WarningDocument(PHIDocument):
-    snapshot_id: PydanticObjectId
+    snapshot_id: DocumentId
     project_id: ProjectId = Field(
         min_length=1,
         max_length=80,
@@ -530,10 +446,6 @@ class WarningDocument(PHIDocument):
 
     class Settings:
         name = "warnings"
-        indexes = [
-            IndexModel([("snapshot_id", ASCENDING)], name="warnings_snapshot_id"),
-            IndexModel([("project_id", ASCENDING), ("rule_id", ASCENDING)], name="warnings_project_rule"),
-        ]
 
     @model_validator(mode="after")
     def require_traceable_evidence(self) -> "WarningDocument":
@@ -548,8 +460,8 @@ class WarningDocument(PHIDocument):
 
 
 class FeedbackDocument(PHIDocument):
-    snapshot_id: PydanticObjectId
-    warning_id: PydanticObjectId | None = None
+    snapshot_id: DocumentId
+    warning_id: DocumentId | None = None
     project_id: ProjectId = Field(
         min_length=1,
         max_length=80,
@@ -562,7 +474,6 @@ class FeedbackDocument(PHIDocument):
 
     class Settings:
         name = "feedback"
-        indexes = [IndexModel([("snapshot_id", ASCENDING)], name="feedback_snapshot_id")]
 
 
 class AuditLogDocument(PHIDocument):
@@ -576,12 +487,6 @@ class AuditLogDocument(PHIDocument):
 
     class Settings:
         name = "audit_log"
-        indexes = [
-            IndexModel(
-                [("target_type", ASCENDING), ("target_id", ASCENDING), ("at", ASCENDING)],
-                name="audit_target_at",
-            ),
-        ]
 
     @model_validator(mode="after")
     def validate_safe_payloads(self) -> "AuditLogDocument":
@@ -674,6 +579,40 @@ class HistoryItem(PrivacySafeModel):
     note: str | None = None
 
 
+class AssessmentCitationView(PrivacySafeModel):
+    """Safe, inspectable reference emitted by the CI health agent."""
+
+    label: str | None = None
+    reference: str = Field(min_length=1, max_length=512)
+
+
+class HealthAssessmentView(PrivacySafeModel):
+    """Frontend contract for a server-produced CI project-health assessment."""
+
+    status: str
+    score: int | float = Field(ge=0, le=100)
+    confidence: float = Field(ge=0, le=1)
+    expected_week: int = Field(
+        validation_alias=AliasChoices("expected_week", "expectedWeek"),
+        serialization_alias="expectedWeek",
+        ge=1,
+        le=52,
+    )
+    explanation: str = Field(min_length=1, max_length=1_000)
+    blockers: list[str] = Field(default_factory=list, max_length=100)
+    recommended_weekly_tasks: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("recommended_weekly_tasks", "recommendedWeeklyTasks"),
+        serialization_alias="recommendedWeeklyTasks",
+        max_length=100,
+    )
+    citations: list[AssessmentCitationView] = Field(default_factory=list, max_length=200)
+    assessment_id: str | None = None
+    spec_version: str | None = None
+    commit_sha: str | None = None
+    generated_at: datetime | None = None
+
+
 class ProjectResponse(PrivacySafeModel):
     """Frontend-compatible project projection with no contributor identities."""
 
@@ -715,6 +654,11 @@ class ProjectResponse(PrivacySafeModel):
     baselines: PublicAggregateMetrics | None = None
     data_completeness_pct: float | None = Field(default=None, ge=0, le=100)
     last_sync_at: datetime | None = None
+    health_assessment: HealthAssessmentView | None = Field(
+        default=None,
+        validation_alias=AliasChoices("health_assessment", "healthAssessment"),
+        serialization_alias="healthAssessment",
+    )
 
     @model_validator(mode="after")
     def enforce_public_contributor_gate(self) -> "ProjectResponse":
@@ -735,13 +679,3 @@ class ProjectResponse(PrivacySafeModel):
     snapshot_id: str | None = None
 
 
-class WeeklySnapshotResponse(PrivacySafeModel):
-    """Shared weekly snapshot response envelope."""
-
-    snapshot_week_start: date
-    snapshot_week_end: date
-    generated_at: datetime
-    rule_set_version: str
-    data_completeness_pct: float = Field(ge=0, le=100)
-    last_sync_at: datetime | None = None
-    projects: list[ProjectResponse] = Field(default_factory=list)

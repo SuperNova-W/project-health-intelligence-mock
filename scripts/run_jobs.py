@@ -54,8 +54,8 @@ def _preflight(settings: Any) -> list[str]:
         problems.append("PHI_GITEA_ORG is not set (the Gitea adapter cannot list repositories without it)")
     if not settings.people_portal_url and not settings.authentik_url:
         problems.append("PHI_PEOPLE_PORTAL_URL or PHI_AUTHENTIK_URL is required for team sizes")
-    if not settings.mongo_uri:
-        problems.append("PHI_MONGO_URI is not set; results will be lost when this process exits")
+    if settings.sqlite_path == ":memory:":
+        problems.append("PHI_SQLITE_PATH is ':memory:'; results will be lost when this process exits")
     return problems
 
 

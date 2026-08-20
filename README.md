@@ -138,4 +138,111 @@ Warnings must include inspectable raw evidence references. Contributor counts an
 PHI_ENVIRONMENT=local PHI_DEV_AUTH=true .venv/bin/pytest -q
 ```
 
+## CI project-health agent (v2 — LLM-driven)
+
+Each project has a lifecycle of roughly 3 months. At kickoff the tech lead
+provides free-form context (goals, delivery requirements, milestones, risks).
+The agent decomposes this into a week-by-week plan using an LLM, which the
+project lead then distributes to the team. Every week the CI pipeline runs an
+assessment: the LLM reads the committed plan, the week's structured CI evidence,
+and an optional narrative progress update from the lead, then produces a health
+signal (`clear`, `watch`, `at_risk`) with inspectable citations and recommendations.
+
+**Architecture guarantee:** the deterministic rule engine always runs first and
+produces a baseline. The LLM can only worsen that verdict (raise severity / lower
+score), never improve it. Hallucinated optimism and prompt injection in the
+progress summary are structurally inert. If the LLM call fails for any reason,
+the deterministic baseline is returned unchanged.
+
+### Quickstart — deterministic only (no API key required)
+
+```bash
+.venv/bin/python scripts/run_ci_assessment.py \
+  --project-id project-health-intelligence \
+  --spec fixtures/project-health-spec.yaml \
+  --evidence fixtures/ci-evidence-week-3.json \
+  --output project-health-assessment.json
+```
+
+### Enable LLM enrichment
+
+Install the optional dependency and set your API key:
+
+```bash
+pip install -e '.[llm]'
+export PHI_ANTHROPIC_API_KEY='sk-ant-...'
+export PHI_LLM_ENABLED=true
+```
+
+Then run with `--llm` and optionally a narrative progress update:
+
+```bash
+.venv/bin/python scripts/run_ci_assessment.py \
+  --project-id project-health-intelligence \
+  --spec fixtures/project-health-spec.yaml \
+  --evidence fixtures/ci-evidence-week-3.json \
+  --llm \
+  --progress-summary "Auth module is complete and deployed to staging. \
+The team is halfway through the data pipeline work for week 3." \
+  --output project-health-assessment.json
+```
+
+### Kickoff — decompose free-form context into a weekly plan
+
+The tech lead's project context is turned into a structured spec via the API:
+
+```bash
+curl -X POST http://localhost:8000/projects/my-project/spec/decompose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "context": "We are building a data pipeline that ingests activity from Gitea \
+and surfaces health signals for engineering leadership. Delivery is 12 weeks. \
+The first milestone is a working ingestion adapter at week 4. The second is \
+a live dashboard at week 8. Final acceptance is a production-ready service at week 12.",
+    "lifecycle_weeks": 12
+  }'
+```
+
+The response includes the generated `spec` (with `spec_version`) for review.
+Commit the spec to the repository before submitting CI assessments so the
+version string is stable across all submissions for the project lifetime.
+
+### LLM configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PHI_LLM_ENABLED` | `false` | Set `true` to enable LLM enrichment. |
+| `PHI_ANTHROPIC_API_KEY` | — | Anthropic API key. Required when LLM is enabled. |
+| `PHI_LLM_ASSESSMENT_MODEL` | `claude-sonnet-4-5` | Model for weekly assessments (runs on every CI push). |
+| `PHI_LLM_DECOMPOSITION_MODEL` | `claude-opus-4-5` | Model for kickoff spec decomposition (runs once per project). |
+| `PHI_LLM_TIMEOUT_SECONDS` | `20.0` | Per-request timeout. Decomposition uses 3× this value, capped at 120 s. |
+
+The default path requires no API key or embeddings. All existing deployments
+continue to work without any configuration change.
+
+### GitHub Actions workflow
+
+`.github/workflows/project-health.yml` runs on push and pull request, uploads
+the JSON assessment, and is non-blocking by default. Set
+`FAIL_ON_PROJECT_HEALTH_RISK=true` to make `at_risk` or `insufficient_data`
+assessments fail CI. Set `PROJECT_HEALTH_INGEST_URL` and the
+`PHI_AGENT_INGEST_TOKEN` secret to POST the assessment to the dashboard.
+Add `PHI_ANTHROPIC_API_KEY` as a repository secret and pass `--llm` to the
+CLI invocation to enable LLM enrichment in CI.
+
+### API endpoints (CI agent)
+
+- `POST /ci/assessments` (alias `/ci/evidence`) — submit `{project_id, spec, spec_format, evidence}`.
+  The `evidence` object accepts an optional `progress_summary` string (free-form
+  narrative from the project lead; must not contain @handles, email addresses,
+  or git co-author trailers).
+- `POST /projects/{id}/spec/decompose` — decompose free-form context into a structured spec (admin/portfolio_leader only).
+- `GET /projects/{id}/assessments/latest` — most recent assessment.
+- `GET /projects/{id}/assessments` — full assessment history.
+- `GET /projects/{id}/weekly-tasks` — outstanding tasks from the latest assessment.
+
+Assessments are append-only; submitting the same project and commit SHA is
+idempotent. Policy states (`planned_pause`, `insufficient_data`) short-circuit
+before the LLM is called — they are never LLM-generated.
+
 The pure rule tests cover baselines, minimum-data guards, evidence, pause suppression, immutability of inputs, and the aggregation floor. See [STATUS.md](STATUS.md) for the frontend-to-endpoint map, assumptions, and remaining stubs.
