@@ -142,6 +142,12 @@ async def trigger_discover_projects(
 
     database = get_active_repository()
     today = date.today()
+    # A boundary only maps repos to a project from its effective_from date
+    # onward, so a boundary dated "today" would be invisible to every
+    # backfilled week before today and every one of those weeks' activity
+    # would fold as unmapped. Backdating well before any club org could have
+    # existed keeps the boundary effective for the org's whole real history.
+    effective_from = date(2020, 1, 1)
     created_projects: list[str] = []
     updated_boundaries: list[str] = []
     skipped: list[str] = []
@@ -186,7 +192,7 @@ async def trigger_discover_projects(
                     project_id=slug,
                     root_authentik_team_id=org_name,
                     primary_repos=primary_repos,
-                    effective_from=today,
+                    effective_from=effective_from,
                     created_by="admin-discover",
                     created_at=utc_now(),
                 ),
