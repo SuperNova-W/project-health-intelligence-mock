@@ -19,7 +19,7 @@ COPY pyproject.toml ./
 COPY backend ./backend
 COPY scripts ./scripts
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[llm]'
 
 EXPOSE 8000
 

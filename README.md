@@ -170,7 +170,7 @@ Install the optional dependency and set your API key:
 
 ```bash
 pip install -e '.[llm]'
-export PHI_ANTHROPIC_API_KEY='sk-ant-...'
+export PHI_OPENAI_API_KEY='sk-...'
 export PHI_LLM_ENABLED=true
 ```
 
@@ -212,9 +212,9 @@ version string is stable across all submissions for the project lifetime.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PHI_LLM_ENABLED` | `false` | Set `true` to enable LLM enrichment. |
-| `PHI_ANTHROPIC_API_KEY` | — | Anthropic API key. Required when LLM is enabled. |
-| `PHI_LLM_ASSESSMENT_MODEL` | `claude-sonnet-4-5` | Model for weekly assessments (runs on every CI push). |
-| `PHI_LLM_DECOMPOSITION_MODEL` | `claude-opus-4-5` | Model for kickoff spec decomposition (runs once per project). |
+| `PHI_OPENAI_API_KEY` | — | OpenAI API key. Required when LLM is enabled. |
+| `PHI_LLM_ASSESSMENT_MODEL` | `gpt-4o` | Model for weekly assessments (runs on every CI push). |
+| `PHI_LLM_DECOMPOSITION_MODEL` | `gpt-4o` | Model for kickoff spec decomposition (runs once per project). |
 | `PHI_LLM_TIMEOUT_SECONDS` | `20.0` | Per-request timeout. Decomposition uses 3× this value, capped at 120 s. |
 
 The default path requires no API key or embeddings. All existing deployments
@@ -227,7 +227,7 @@ the JSON assessment, and is non-blocking by default. Set
 `FAIL_ON_PROJECT_HEALTH_RISK=true` to make `at_risk` or `insufficient_data`
 assessments fail CI. Set `PROJECT_HEALTH_INGEST_URL` and the
 `PHI_AGENT_INGEST_TOKEN` secret to POST the assessment to the dashboard.
-Add `PHI_ANTHROPIC_API_KEY` as a repository secret and pass `--llm` to the
+Add `PHI_OPENAI_API_KEY` as a repository secret and pass `--llm` to the
 CLI invocation to enable LLM enrichment in CI.
 
 ### API endpoints (CI agent)
