@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -75,6 +75,11 @@ class DiffLimits:
     # /commits (and this reader) intentionally track the default branch
     # only, by product decision -- unmerged feature-branch work is not
     # counted until it lands on main.
+    # Cumulative-progress "shallow layer" bounds (history_metadata): commit
+    # LIST pages only, never a per-commit stat/diff call -- that restraint
+    # is what keeps a metadata sweep over months of history cheap.
+    max_history_pages_per_repo: int = 20
+    max_history_subject_samples: int = 60
 
 
 DEFAULT_LIMITS = DiffLimits()
@@ -126,6 +131,27 @@ class WeekCodeEvidence:
     @property
     def total_fetch_errors(self) -> int:
         return sum(len(repo.fetch_errors) for repo in self.repos)
+
+
+@dataclass
+class HistoryMetadata:
+    """A cheap, metadata-only sweep over a (possibly long) date range.
+
+    Deliberately shallow: total commit counts per ISO week and a bounded
+    sample of commit subject lines, built from the commit LIST endpoint
+    only. No per-commit stat or diff fetch, so cost is a small, fixed
+    number of paginated requests regardless of how much history the range
+    covers -- this is what keeps a cumulative-progress "shallow layer"
+    independent of history length. Noise (lockfiles etc.) is NOT filtered
+    here since that requires a per-commit file list (a stat call); counts
+    are raw commit volume, and the synthesis prompt is told so.
+    """
+
+    weeks_counts: dict[date, int] = field(default_factory=dict)  # ISO week_start -> commit count
+    subject_samples: list[dict[str, Any]] = field(default_factory=list)  # bounded: {repo_slug, sha, subject, week_start}
+    repos_covered: list[str] = field(default_factory=list)
+    truncated: bool = False
+    fetch_errors: list[str] = field(default_factory=list)
 
 
 def _parse_gitea_datetime(value: Any) -> datetime | None:
@@ -249,6 +275,54 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
             page_size=self.page_size,
             max_pages=self.max_pages,
         )
+
+    def history_metadata(self, repo_slugs: Sequence[str], *, start: date, end: date) -> HistoryMetadata:
+        """Cheap per-week commit counts + subject sample over a date range.
+
+        Uses only the commit LIST endpoint (paginated, capped at
+        ``max_history_pages_per_repo`` pages/repo) -- never ``commit_stat``
+        or ``commit_diff``. That's the whole point: cost here is a small,
+        fixed number of requests independent of how long ``[start, end]``
+        is, which is what makes a cumulative-progress "shallow layer" over
+        months of history cheap.
+        """
+        since = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+        until = datetime.combine(end, datetime.max.time(), tzinfo=timezone.utc)
+        result = HistoryMetadata(repos_covered=list(repo_slugs)[: self.limits.max_repos])
+        for repo_slug in result.repos_covered:
+            try:
+                raw_commits = self.pages(
+                    self._repo_path(repo_slug, "commits"),
+                    params={"since": _iso(since), "until": _iso(until)},
+                    page_size=self.page_size,
+                    max_pages=self.limits.max_history_pages_per_repo,
+                )
+            except RuntimeError:
+                # _HttpxAdapter.pages() raises RuntimeError when pagination
+                # exceeds max_pages -- that's a truncation, not a failure.
+                result.truncated = True
+                continue
+            except Exception as exc:
+                result.fetch_errors.append(f"{repo_slug}: history fetch failed: {exc}")
+                continue
+            if len(raw_commits) >= self.page_size * self.limits.max_history_pages_per_repo:
+                result.truncated = True
+            for raw in raw_commits:
+                when = _parse_gitea_datetime((raw.get("commit") or {}).get("committer", {}).get("date"))
+                if when is None or not (since <= when <= until):
+                    continue
+                week_start = when.date() - timedelta(days=when.date().weekday())
+                result.weeks_counts[week_start] = result.weeks_counts.get(week_start, 0) + 1
+                if len(result.subject_samples) < self.limits.max_history_subject_samples:
+                    message = str((raw.get("commit") or {}).get("message", "")).strip()
+                    subject = message.splitlines()[0] if message else ""
+                    result.subject_samples.append({
+                        "repo_slug": repo_slug,
+                        "sha": str(raw.get("sha", ""))[:12],
+                        "subject": subject,
+                        "week_start": week_start.isoformat(),
+                    })
+        return result
 
     def commit_stat(self, repo_slug: str, sha: str) -> Mapping[str, Any] | None:
         try:

@@ -49,6 +49,7 @@ class FakeGiteaClient:
         self.meta_by_sha = meta_by_sha
         self.diff_by_sha = diff_by_sha or {}
         self.diff_calls: list[str] = []
+        self.stat_calls: list[str] = []
 
     def get(self, url: str, params: dict[str, Any] | None = None, **_: Any) -> FakeResponse:
         params = params or {}
@@ -58,6 +59,7 @@ class FakeGiteaClient:
             return FakeResponse(text=self.diff_by_sha.get(sha, ""))
         if "/git/commits/" in url:
             sha = url.rsplit("/", 1)[-1]
+            self.stat_calls.append(sha)
             return FakeResponse(payload=self.meta_by_sha.get(sha, {}))
         if url.endswith("/commits"):
             return FakeResponse(payload=self.commits)
@@ -208,3 +210,55 @@ def test_commits_outside_the_window_are_dropped_even_if_gitea_returns_them() -> 
     evidence = reader.week_evidence(project_id="p1", repo_slugs=["r1"], week_start=WEEK_START, week_end=WEEK_END)
     shas = {commit.sha for commit in evidence.repos[0].commits}
     assert shas == {"in1234567"}
+
+
+def test_history_metadata_never_calls_stat_or_diff() -> None:
+    """Cost-regression guard: the shallow layer must stay cheap regardless
+    of how many commits/how much history it covers."""
+    commits = [_commit(f"sha{i:04d}", f"commit {i}", f"2026-{2 + i // 20:02d}-{1 + i % 20:02d}T00:00:00Z") for i in range(80)]
+    client = FakeGiteaClient(commits=commits, meta_by_sha={})
+    reader = GiteaCodeEvidenceReader(base_url="https://gitea.example", token="tok", organization="org", client=client)
+    result = reader.history_metadata(["r1"], start=date(2026, 1, 1), end=date(2026, 6, 1))
+    assert client.stat_calls == []
+    assert client.diff_calls == []
+    assert sum(result.weeks_counts.values()) == 80
+
+
+def test_history_metadata_buckets_by_iso_week() -> None:
+    commits = [
+        _commit("a1234567", "one", "2026-03-04T00:00:00Z"),
+        _commit("a2234567", "two", "2026-03-05T00:00:00Z"),
+        _commit("a3234567", "three", "2026-03-11T00:00:00Z"),
+    ]
+    client = FakeGiteaClient(commits=commits, meta_by_sha={})
+    reader = GiteaCodeEvidenceReader(base_url="https://gitea.example", token="tok", organization="org", client=client)
+    result = reader.history_metadata(["r1"], start=date(2026, 3, 1), end=date(2026, 3, 31))
+    assert result.weeks_counts == {date(2026, 3, 2): 2, date(2026, 3, 9): 1}
+
+
+def test_history_metadata_caps_subject_samples() -> None:
+    commits = [_commit(f"s{i:04d}", f"subject {i}", "2026-03-04T00:00:00Z") for i in range(10)]
+    client = FakeGiteaClient(commits=commits, meta_by_sha={})
+    limits = DiffLimits(max_history_subject_samples=3)
+    reader = GiteaCodeEvidenceReader(base_url="https://gitea.example", token="tok", organization="org", client=client, limits=limits)
+    result = reader.history_metadata(["r1"], start=date(2026, 3, 1), end=date(2026, 3, 31))
+    assert len(result.subject_samples) == 3
+    assert sum(result.weeks_counts.values()) == 10
+
+
+def test_history_metadata_isolates_per_repo_failures() -> None:
+    commits = [_commit("ok1234567", "fine", "2026-03-04T00:00:00Z")]
+    client = FakeGiteaClient(commits=commits, meta_by_sha={})
+
+    def failing_get(url: str, params: dict[str, Any] | None = None, **_: Any) -> FakeResponse:
+        if "bad-repo" in url:
+            raise OSError("simulated network failure")
+        return client.get(url, params)
+
+    class Wrapper:
+        get = staticmethod(failing_get)
+
+    reader = GiteaCodeEvidenceReader(base_url="https://gitea.example", token="tok", organization="org", client=Wrapper())
+    result = reader.history_metadata(["bad-repo", "good-repo"], start=date(2026, 3, 1), end=date(2026, 3, 31))
+    assert result.fetch_errors
+    assert sum(result.weeks_counts.values()) == 1
