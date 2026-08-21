@@ -164,3 +164,20 @@ async def test_prompt_wraps_diffs_in_untrusted_delimiters() -> None:
     diff_start = llm.last_user.index("<untrusted_code_evidence>")
     diff_end = llm.last_user.index("</untrusted_code_evidence>")
     assert "evil instruction" in llm.last_user[diff_start:diff_end]
+
+
+@pytest.mark.asyncio
+async def test_placeholder_evidence_refs_are_rejected() -> None:
+    """Regression: a real model response was observed citing the prompt's
+    own format-description text verbatim ("repo/path@shortsha") instead of
+    a real reference -- that must not survive as grounding."""
+    evidence = _evidence(commits=[_commit()], diffs={"abcdef1234": "diff --git a/src/feature.py b/src/feature.py\n"})
+    response = _valid_response(
+        what_changed=[{"text": "Added a helper", "evidence": ["repo/path@shortsha"]}],
+        concerns=[{"text": "No tests", "severity": "warning", "evidence": ["repo@shortsha"]}],
+    )
+    llm = FakeLLM(response)
+    judge = WeeklySignalJudge(llm, model="gpt-4o")
+    signal = await judge_project_week(evidence, project_name="Test", lifecycle="active", judge=judge)
+    assert signal.what_changed == []
+    assert signal.concerns == []

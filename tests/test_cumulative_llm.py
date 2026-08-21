@@ -172,3 +172,22 @@ async def test_deep_signal_evidence_is_carried_into_prompt() -> None:
     )
     assert "2026-04-13" in llm.last_user
     assert "No tests" in llm.last_user
+
+
+@pytest.mark.asyncio
+async def test_placeholder_evidence_refs_are_rejected() -> None:
+    """Same regression as backend.signal_llm: a real model response echoed
+    the prompt's format-description text verbatim instead of a real ref."""
+    shallow = HistoryMetadata(weeks_counts={date(2026, 2, 2): 5}, repos_covered=["repo"])
+    response = _valid_response(
+        milestones=[{"text": "Core feature landed", "evidence": ["repo/path@shortsha"]}],
+        open_concerns=[{"text": "No tests yet", "severity": "warning", "evidence": ["repo@shortsha"]}],
+    )
+    llm = FakeLLM(response)
+    judge = CumulativeCheckpointJudge(llm, model="gpt-4o")
+    checkpoint = await judge_project_cumulative(
+        project_name="Test", lifecycle="active", as_of_date=AS_OF, coverage_start=COVERAGE_START,
+        deep_signals=[_deep_signal(date(2026, 4, 13))], shallow=shallow, judge=judge,
+    )
+    assert checkpoint.milestones == []
+    assert checkpoint.open_concerns == []
