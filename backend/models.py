@@ -399,6 +399,20 @@ class WeeklySnapshotDocument(PHIDocument):
     series: dict[str, list[float | int | None]] = Field(default_factory=dict)
     series_baselines: dict[str, list[float | int | None]] = Field(default_factory=dict)
 
+    # Populated only when rule_set_version is an LLM-signal generation
+    # (SIGNAL_VERSION in backend.signal_llm); absent/None on rule-engine rows.
+    signal_source: Literal["rules", "llm"] | None = None
+    signal_headline: str | None = Field(default=None, max_length=160)
+    signal_summary: str | None = Field(default=None, max_length=800)
+    signal_confidence: float | None = Field(default=None, ge=0, le=1)
+    signal_work_volume: str | None = Field(default=None, max_length=20)
+    signal_model: str | None = Field(default=None, max_length=120)
+    signal_recommendations: list[str] = Field(default_factory=list, max_length=8)
+    # {id, kind, repo_slug, sha, subject, files_changed, additions, deletions} --
+    # which commits/files the judge saw, not diff text (avoids persisting
+    # anything diff-shaped, which student repos can leak secrets into).
+    signal_facts: list[dict[str, Any]] = Field(default_factory=list, max_length=60)
+
     class Settings:
         name = "weekly_snapshots"
 

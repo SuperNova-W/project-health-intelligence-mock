@@ -272,14 +272,25 @@ async def _project_response(project: Any, snapshot: WeeklySnapshotDocument | Non
     contributor_series = series.get("contributors", [None] * 8) if snapshot.metrics.active_contributors is not None else None
     days_since_activity = snapshot.metrics.days_since_activity
     last_activity = "—" if days_since_activity is None else "Today" if days_since_activity == 0 else "Yesterday" if days_since_activity == 1 else f"{days_since_activity} days ago"
-    first_warning = warnings[0].signal_name if warnings else ("Inactivity is expected" if snapshot.attention_status == AttentionStatus.PLANNED_PAUSE else "No current concern detected" if snapshot.attention_status == AttentionStatus.CLEAR else "Repository mapping incomplete" if snapshot.attention_status == AttentionStatus.INSUFFICIENT_DATA else "Review current project signals")
-    detail = warnings[0].explanation if warnings else ("Pause recorded; signals are suppressed." if snapshot.attention_status == AttentionStatus.PLANNED_PAUSE else "Ownership review required" if snapshot.attention_status == AttentionStatus.INSUFFICIENT_DATA else "Available project aggregates are within the current rule set.")
+    is_llm_signal = snapshot.signal_source == "llm"
+    first_warning = snapshot.signal_headline if (is_llm_signal and snapshot.signal_headline) else warnings[0].signal_name if warnings else ("Inactivity is expected" if snapshot.attention_status == AttentionStatus.PLANNED_PAUSE else "No current concern detected" if snapshot.attention_status == AttentionStatus.CLEAR else "Repository mapping incomplete" if snapshot.attention_status == AttentionStatus.INSUFFICIENT_DATA else "Review current project signals")
+    detail = snapshot.signal_summary if (is_llm_signal and snapshot.signal_summary) else warnings[0].explanation if warnings else ("Pause recorded; signals are suppressed." if snapshot.attention_status == AttentionStatus.PLANNED_PAUSE else "Ownership review required" if snapshot.attention_status == AttentionStatus.INSUFFICIENT_DATA else "Available project aggregates are within the current rule set.")
     weeks = list(series.get("activity", [None] * 8))[-8:]
     weeks = [None] * (8 - len(weeks)) + weeks
+    # An LLM-sourced snapshot has no rule-engine baseline math behind it, so
+    # flagFrom (a rule-threshold week index) and a status-derived trend would
+    # both be fabricated -- flagFrom is fixed at "no threshold" and trend
+    # comes from the judge's own work_volume read instead.
+    trend = (
+        ("down" if snapshot.signal_work_volume in {"none", "trivial"} else "flat")
+        if is_llm_signal
+        else ("down" if status_class in {"risk", "watch"} else "flat")
+    )
+    flag_from = 99 if is_llm_signal else (5 if status_class == "risk" else 6 if status_class == "watch" else 99)
     return ProjectResponse(
         id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team=boundary.root_authentik_team_id if boundary else "Unassigned", repo=boundary.primary_repos[0].repo_slug if boundary and boundary.primary_repos else "—",
-        status=status_value, statusClass=status_class, signal=first_warning, signalDetail=detail, lastActivity=last_activity, trend="down" if status_class in {"risk", "watch"} else "flat", weeks=weeks,
-        flagFrom=5 if status_class == "risk" else 6 if status_class == "watch" else 99, seriesBaselines=_series_baselines(snapshot), series={"activity": series.get("activity", [None] * 8), "openPRs": series.get("openPRs", series.get("open_prs", [None] * 8)), "reviewLatency": series.get("review_latency", series.get("reviewLatency", series.get("review_latency_days", [None] * 8))), "contributors": contributor_series}, description="", boundary=_boundary_view(boundary, project), evidence=evidence, history=await _history(project.project_id), metrics=metrics, baselines=baselines, data_completeness_pct=snapshot.data_completeness_pct, last_sync_at=snapshot.last_sync_at, snapshot_id=_snapshot_id(snapshot), healthAssessment=assessment,
+        status=status_value, statusClass=status_class, signal=first_warning, signalDetail=detail, lastActivity=last_activity, trend=trend, weeks=weeks,
+        flagFrom=flag_from, seriesBaselines=_series_baselines(snapshot), series={"activity": series.get("activity", [None] * 8), "openPRs": series.get("openPRs", series.get("open_prs", [None] * 8)), "reviewLatency": series.get("review_latency", series.get("reviewLatency", series.get("review_latency_days", [None] * 8))), "contributors": contributor_series}, description="", boundary=_boundary_view(boundary, project), evidence=evidence, history=await _history(project.project_id), metrics=metrics, baselines=baselines, data_completeness_pct=snapshot.data_completeness_pct, last_sync_at=snapshot.last_sync_at, snapshot_id=_snapshot_id(snapshot), healthAssessment=assessment,
     ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
