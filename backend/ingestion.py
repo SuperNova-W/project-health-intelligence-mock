@@ -339,6 +339,13 @@ class _HttpxAdapter:
             raiser()
         return response.json()
 
+    def get_text(self, path_or_url: str, params: Mapping[str, Any] | None = None) -> str:
+        response = self._get_client().get(self._url(path_or_url), params=dict(params or {}))
+        raiser = getattr(response, "raise_for_status", None)
+        if raiser is not None:
+            raiser()
+        return response.text
+
     def pages(
         self,
         path: str,

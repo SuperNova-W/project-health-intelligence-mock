@@ -247,11 +247,25 @@ async def diagnose_gitea_diff(
         except Exception as exc:
             return {"ok": False, "url": url, "error": str(exc)}
     body = response.text
-    return {
-        "ok": response.status_code == 200 and body.lstrip().startswith("diff "),
+    result = {
+        "ok": response.status_code == 200 and "diff --git" in body,
         "url": url,
         "status_code": response.status_code,
         "content_type": response.headers.get("content-type"),
         "byte_length": len(body.encode("utf-8", errors="replace")),
         "preview": body[:300],
     }
+    meta_url = f"{settings.gitea_url.rstrip('/')}/api/v1/repos/{org}/{repo}/git/commits/{sha}?stat=true&files=true"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            meta_response = await client.get(
+                meta_url, headers={"Authorization": f"token {settings.gitea_api_token}"}
+            )
+            meta = meta_response.json()
+            result["commit_meta_keys"] = sorted(meta.keys())
+            result["stats"] = meta.get("stats")
+            files = meta.get("files")
+            result["files_sample"] = files[:2] if isinstance(files, list) else files
+        except Exception as exc:
+            result["commit_meta_error"] = str(exc)
+    return result
