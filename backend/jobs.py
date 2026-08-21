@@ -877,17 +877,32 @@ async def run_weekly_snapshot_job(
     *,
     week_start: date | None = None,
     rule_set_version: str | None = None,
+    engine: str | None = None,
 ) -> dict[str, Any]:
+    """Compute this week's portfolio snapshot -- the Sunday-cron entrypoint.
+
+    ``engine`` defaults to ``"llm"`` when LLM enrichment is configured, else
+    falls back to ``"rules"``. This is a soft default, not a hard cutover:
+    an LLM outage or a missing API key on a Sunday night shouldn't leave the
+    whole dashboard blank with no fallback path, and the rule engine stays
+    the only path local/demo mode (no OpenAI key) can exercise.
+    """
+    settings = settings or get_settings()
     database = database or get_active_repository()
-    created = await generate_weekly_snapshots(
-        settings=settings,
-        database=database,
-        week_start=week_start,
-        rule_set_version=rule_set_version,
-    )
+    resolved_engine = engine or ("llm" if settings.llm_active else "rules")
+    if resolved_engine == "llm":
+        created = await generate_llm_weekly_snapshots(settings=settings, database=database, week_start=week_start)
+    else:
+        created = await generate_weekly_snapshots(
+            settings=settings,
+            database=database,
+            week_start=week_start,
+            rule_set_version=rule_set_version,
+        )
     return {
         "status": "ok",
         "job": "weekly_snapshot",
+        "engine": resolved_engine,
         "snapshots_written": created,
         "outbound_notifications": False,
     }

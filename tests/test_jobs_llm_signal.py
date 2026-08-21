@@ -9,7 +9,7 @@ import pytest
 
 from backend.code_evidence import CommitFact, RepoCodeEvidence, WeekCodeEvidence
 from backend.db import SqliteStore
-from backend.jobs import generate_llm_snapshot, generate_llm_weekly_snapshots
+from backend.jobs import generate_llm_snapshot, generate_llm_weekly_snapshots, run_weekly_snapshot_job
 from backend.models import LifecycleState, PlannedPause
 from backend.signal_llm import SIGNAL_VERSION, WeeklySignalJudge
 
@@ -155,3 +155,37 @@ async def test_generate_llm_weekly_snapshots_fans_out_across_projects(in_memory_
 
     snapshots = [s for s in await in_memory_store.list("snapshots") if s.rule_set_version == SIGNAL_VERSION]
     assert {s.project_id for s in snapshots} == {"proj-a", "proj-b"}
+
+
+@pytest.mark.asyncio
+async def test_run_weekly_snapshot_job_defaults_to_llm_when_active(in_memory_store: SqliteStore, test_settings, make_project, make_boundary, monkeypatch) -> None:
+    await in_memory_store.add("projects", make_project())
+    await in_memory_store.add("boundaries", make_boundary())
+    test_settings.llm_enabled = True
+    test_settings.openai_api_key = "test-key"
+
+    called: dict[str, Any] = {}
+
+    async def fake_llm_fanout(*, settings, database, week_start=None, concurrency=3):
+        called["engine"] = "llm"
+        return 0
+
+    monkeypatch.setattr("backend.jobs.generate_llm_weekly_snapshots", fake_llm_fanout)
+    result = await run_weekly_snapshot_job(settings=test_settings, database=in_memory_store, week_start=WEEK_START)
+    assert result["engine"] == "llm"
+    assert called["engine"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_run_weekly_snapshot_job_rules_override_bypasses_llm(in_memory_store: SqliteStore, test_settings, make_project, make_boundary, monkeypatch) -> None:
+    await in_memory_store.add("projects", make_project())
+    await in_memory_store.add("boundaries", make_boundary())
+    test_settings.llm_enabled = True
+    test_settings.openai_api_key = "test-key"
+
+    async def fail_if_called(*args: Any, **kwargs: Any) -> int:
+        raise AssertionError("LLM fanout should not run when engine='rules' is forced")
+
+    monkeypatch.setattr("backend.jobs.generate_llm_weekly_snapshots", fail_if_called)
+    result = await run_weekly_snapshot_job(settings=test_settings, database=in_memory_store, week_start=WEEK_START, engine="rules")
+    assert result["engine"] == "rules"

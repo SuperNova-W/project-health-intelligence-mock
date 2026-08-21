@@ -920,7 +920,15 @@ def evaluate_mvp_rules(
     aggregation_floor: int | None = None,
     minimum_data_volume: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Evaluate all MVP rules without combining them into a project status."""
+    """Evaluate all MVP rules without combining them into a project status.
+
+    Deprecated as the default production signal source: ``run_weekly_snapshot_job``
+    now prefers ``backend.signal_llm``'s LLM-judged weekly signal when LLM
+    enrichment is configured, and only falls back to this deterministic
+    trailing-baseline engine when it isn't (local/demo mode, or an LLM
+    outage). Kept because ``backend.seed``'s local fixtures and this
+    module's own test suite depend on it requiring no API key.
+    """
 
     return {
         "activity_decline": activity_decline(

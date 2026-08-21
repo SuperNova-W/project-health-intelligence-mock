@@ -57,6 +57,7 @@ async def trigger_nightly_sync(
 @router.post("/weekly")
 async def trigger_weekly_snapshot(
     week_start: date | None = Query(default=None),
+    engine: str | None = Query(default=None, description="'llm' or 'rules'; defaults to 'llm' when configured, else 'rules'."),
     x_admin_sync_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _check_token(x_admin_sync_token)
@@ -64,6 +65,7 @@ async def trigger_weekly_snapshot(
         settings=get_settings(),
         database=get_active_repository(),
         week_start=week_start,
+        engine=engine,
     )
 
 
