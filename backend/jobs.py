@@ -19,8 +19,14 @@ from typing import Any
 
 import anyio
 
-from .code_evidence import GiteaCodeEvidenceReader
+from .code_evidence import GiteaCodeEvidenceReader, HistoryMetadata
 from .config import Settings, get_settings
+from .cumulative_llm import (
+    CUMULATIVE_VERSION,
+    CumulativeCheckpoint,
+    CumulativeCheckpointJudge,
+    judge_project_cumulative,
+)
 from .db import get_active_repository
 from .ingestion import (
     AuthentikTeamHierarchyAdapter,
@@ -31,6 +37,7 @@ from .ingestion import (
 from .models import (
     AggregateMetrics,
     AttentionStatus,
+    CumulativeCheckpointDocument,
     EvidenceReference,
     RepoActivityDocument,
     WarningDocument,
@@ -977,6 +984,7 @@ async def generate_llm_snapshot(
     settings: Settings | None = None,
     database: Any = None,
     judge: WeeklySignalJudge | None = None,
+    persist: bool = True,
 ) -> WeeklySnapshotDocument | None:
     """Compute, or return the already-cached, LLM-judged snapshot for one project-week.
 
@@ -986,6 +994,12 @@ async def generate_llm_snapshot(
     the function the "Compute this week" button and the weekly cron both
     call; the per-(project, week) lock means two concurrent callers pay for
     at most one OpenAI call.
+
+    ``persist=False`` computes and returns a snapshot without writing
+    anything to the database -- used by ``generate_cumulative_checkpoint``
+    when the deep tail includes the current, still-in-progress ISO week:
+    ``weekly_snapshots`` is immutable, so caching a partial week as if it
+    were final would freeze a wrong verdict for the rest of the week.
     """
     settings = settings or get_settings()
     database = database or get_active_repository()
@@ -1029,7 +1043,8 @@ async def generate_llm_snapshot(
                 signal_confidence=1.0,
                 signal_work_volume="none",
             )
-            await database.add("snapshots", snapshot)
+            if persist:
+                await database.add("snapshots", snapshot)
             return snapshot
 
         is_new_project = not any(str(snap.project_id) == project_id for snap in all_snapshots)
@@ -1114,6 +1129,9 @@ async def generate_llm_snapshot(
 
         snapshot_id = new_id()
         warning_documents: list[WarningDocument] = []
+        repo_documents: list[RepoActivityDocument] = []
+        # A placeholder id lets concern->evidence linking work identically
+        # whether or not the repo_activity row actually gets written below.
         repo_activity_ids: dict[str, str] = {}
         if evidence is not None:
             for repo in evidence.repos:
@@ -1135,7 +1153,7 @@ async def generate_llm_snapshot(
                     data_completeness_pct=completeness,
                     last_sync_at=now,
                 )
-                await database.add("repo_activity", repo_doc)
+                repo_documents.append(repo_doc)
                 repo_activity_ids[repo.repo_slug] = str(repo_doc.id)
 
             fallback_repo_id = next(iter(repo_activity_ids.values()), None)
@@ -1218,9 +1236,12 @@ async def generate_llm_snapshot(
                 for commit in non_noise
             ][:60],
         )
-        for warning in warning_documents:
-            await database.add("warnings", warning)
-        await database.add("snapshots", snapshot)
+        if persist:
+            for repo_doc in repo_documents:
+                await database.add("repo_activity", repo_doc)
+            for warning in warning_documents:
+                await database.add("warnings", warning)
+            await database.add("snapshots", snapshot)
         return snapshot
 
 
@@ -1276,6 +1297,252 @@ def get_signal_judge(settings: Settings) -> WeeklySignalJudge | None:
         return WeeklySignalJudge(llm, model=settings.llm_signal_model)
     except Exception:
         return None
+
+
+def get_cumulative_judge(settings: Settings) -> CumulativeCheckpointJudge | None:
+    """Build a ``CumulativeCheckpointJudge`` if LLM enrichment is configured, else ``None``."""
+    if not settings.llm_active:
+        return None
+    try:
+        from .llm import OpenAIStructuredLLM
+
+        llm = OpenAIStructuredLLM(api_key=settings.openai_api_key, timeout_s=settings.llm_signal_timeout_seconds)  # type: ignore[arg-type]
+        return CumulativeCheckpointJudge(llm, model=settings.llm_cumulative_model)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Cumulative progress-as-of-date (backend.cumulative_llm) -- lazy, per
+# (project, as-of-date), automatically fanned out client-side across the
+# whole portfolio when a date is picked on the Projects page.
+# ---------------------------------------------------------------------------
+
+_CUMULATIVE_LOCKS: dict[tuple[str, date], asyncio.Lock] = {}
+_CUMULATIVE_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _cumulative_lock(key: tuple[str, date]) -> asyncio.Lock:
+    async with _CUMULATIVE_LOCKS_GUARD:
+        if len(_CUMULATIVE_LOCKS) > 256:
+            _CUMULATIVE_LOCKS.clear()
+        return _CUMULATIVE_LOCKS.setdefault(key, asyncio.Lock())
+
+
+def _iso_week_start(value: date) -> date:
+    return value - timedelta(days=value.weekday())
+
+
+def _checkpoint_to_context(doc: CumulativeCheckpointDocument) -> CumulativeCheckpoint:
+    """Minimal reconstruction of a persisted checkpoint for use as prior context."""
+    return CumulativeCheckpoint(
+        status=doc.status,
+        confidence=doc.confidence,
+        trajectory=doc.trajectory,
+        headline=doc.headline,
+        narrative=doc.narrative,
+        work_to_date=doc.work_to_date,
+    )
+
+
+def _snapshot_to_weekly_signal(snapshot: WeeklySnapshotDocument) -> WeeklySignal:
+    """Rehydrate just enough of a WeeklySignal from a persisted snapshot.
+
+    ``concerns``/``what_changed`` aren't stored structurally on
+    ``WeeklySnapshotDocument`` (they became ``WarningDocument`` rows
+    instead), so they come back empty here regardless of whether the
+    snapshot was just computed or read from cache -- the cumulative
+    prompt still gets each week's headline/status, and its own grounding
+    rule allows a plain week-date reference when no finer-grained
+    evidence is available.
+    """
+    return WeeklySignal(
+        status=snapshot.attention_status,
+        confidence=snapshot.signal_confidence if snapshot.signal_confidence is not None else 0.5,
+        headline=snapshot.signal_headline or "(no headline)",
+        summary=snapshot.signal_summary or "",
+        work_volume=snapshot.signal_work_volume or "none",
+    )
+
+
+async def generate_cumulative_checkpoint(
+    project_id: str,
+    as_of_date: date,
+    *,
+    settings: Settings | None = None,
+    database: Any = None,
+    weekly_judge: WeeklySignalJudge | None = None,
+    cumulative_judge: CumulativeCheckpointJudge | None = None,
+) -> CumulativeCheckpointDocument | None:
+    """Compute, or return the already-cached, cumulative-progress checkpoint.
+
+    Bounded, two-layer evidence (see ``backend.cumulative_llm`` module
+    docstring): a small "deep tail" of full diff-judged recent weeks
+    (reusing ``generate_llm_snapshot`` unchanged, cached forever per week)
+    plus, only when there's no recent-enough prior checkpoint to build on,
+    one cheap commit-count sweep over older history. Cost per call is
+    bounded and independent of how much project history exists.
+
+    ``None`` means nothing could be computed (no project, or the
+    synthesis failed) -- callers must not treat that as a cacheable
+    "insufficient data" result; a retry can still succeed.
+    """
+    settings = settings or get_settings()
+    database = database or get_active_repository()
+    now = _utc_now()
+    today = now.date()
+    as_of_date = min(as_of_date, today)
+    as_of_week_start = _iso_week_start(as_of_date)
+    current_week_start = _iso_week_start(today)
+    is_provisional = as_of_week_start == current_week_start
+
+    lock = await _cumulative_lock((project_id, as_of_week_start))
+    async with lock:
+        all_checkpoints = await database.list("cumulative_checkpoints")
+        project_checkpoints = [
+            c for c in all_checkpoints
+            if str(c.project_id) == project_id and c.signal_version == CUMULATIVE_VERSION
+        ]
+        existing = next((c for c in project_checkpoints if c.as_of_week_start == as_of_week_start), None)
+        if existing is not None:
+            if not existing.is_provisional:
+                return existing
+            ttl = timedelta(minutes=settings.cumulative_provisional_ttl_minutes)
+            if now - existing.generated_at < ttl:
+                return existing
+            # Stale provisional (current week, old enough to be worth a
+            # fresh look) -- fall through and recompute.
+
+        project = await database.get_project(project_id)
+        if project is None:
+            return None
+
+        boundary = await database.boundary_at(project_id, as_of_date)
+        coverage_start = boundary.effective_from if boundary else as_of_date
+        coverage_start = min(coverage_start, as_of_date)
+
+        prior_doc = max(
+            (c for c in project_checkpoints if c.as_of_week_start < as_of_week_start and not c.is_provisional),
+            key=lambda c: c.as_of_week_start,
+            default=None,
+        )
+        gap_weeks = (as_of_week_start - prior_doc.as_of_week_start).days // 7 if prior_doc else None
+        deep_tail_weeks = max(1, settings.cumulative_deep_tail_weeks)
+        warm = prior_doc is not None and gap_weeks is not None and gap_weeks <= deep_tail_weeks
+
+        rebuild_depth = max(1, settings.cumulative_chain_rebuild_depth)
+        use_prior_context = prior_doc is not None and prior_doc.chain_depth < rebuild_depth
+        new_chain_depth = (prior_doc.chain_depth + 1) if use_prior_context else 0
+        prior_context = _checkpoint_to_context(prior_doc) if use_prior_context else None
+
+        if warm:
+            deep_week_starts = [prior_doc.as_of_week_start + timedelta(weeks=i + 1) for i in range(gap_weeks)]
+        else:
+            deep_week_starts = [as_of_week_start - timedelta(weeks=i) for i in range(deep_tail_weeks)]
+        deep_week_starts = sorted({w for w in deep_week_starts if coverage_start <= w <= as_of_week_start})
+
+        weekly_judge = weekly_judge if weekly_judge is not None else get_signal_judge(settings)
+        semaphore = asyncio.Semaphore(3)
+
+        async def _judge_week(week_start: date) -> WeeklySnapshotDocument | None:
+            async with semaphore:
+                persist = week_start != current_week_start
+                return await generate_llm_snapshot(
+                    project_id, week_start, settings=settings, database=database,
+                    judge=weekly_judge, persist=persist,
+                )
+
+        deep_snapshots = await asyncio.gather(*(_judge_week(week_start) for week_start in deep_week_starts))
+        deep_signals: list[tuple[date, WeeklySignal]] = [
+            (snapshot.week_start, _snapshot_to_weekly_signal(snapshot))
+            for snapshot in deep_snapshots
+            if snapshot is not None
+        ]
+        source_snapshot_ids = [
+            str(snapshot.id) for snapshot in deep_snapshots
+            if snapshot is not None and snapshot.week_start != current_week_start and snapshot.id is not None
+        ]
+
+        shallow: HistoryMetadata | None = None
+        history_truncated = False
+        if not warm:
+            deep_tail_start = min(deep_week_starts) if deep_week_starts else as_of_week_start
+            shallow_end = deep_tail_start - timedelta(days=1)
+            if coverage_start <= shallow_end:
+                built = await build_code_evidence_reader(settings, database, project_id, at=as_of_date)
+                if built is not None:
+                    reader, repo_slugs = built
+                    try:
+                        shallow = await anyio.to_thread.run_sync(
+                            lambda: reader.history_metadata(repo_slugs, start=coverage_start, end=shallow_end)
+                        )
+                    finally:
+                        closer = getattr(reader, "close", None)
+                        if closer is not None:
+                            closer()
+                    history_truncated = shallow.truncated
+                # Promote already-cached weekly rows inside the shallow span
+                # to real deep signals -- free fidelity, never recomputed.
+                deep_weeks_seen = {week_start for week_start, _ in deep_signals}
+                all_snapshots = await database.list("snapshots")
+                for snap in all_snapshots:
+                    if (
+                        str(snap.project_id) == project_id
+                        and snap.rule_set_version == "llm-signal-v1"
+                        and coverage_start <= snap.week_start <= shallow_end
+                        and snap.week_start not in deep_weeks_seen
+                    ):
+                        deep_signals.append((snap.week_start, _snapshot_to_weekly_signal(snap)))
+                        if snap.id is not None:
+                            source_snapshot_ids.append(str(snap.id))
+                        deep_weeks_seen.add(snap.week_start)
+
+        cumulative_judge = cumulative_judge if cumulative_judge is not None else get_cumulative_judge(settings)
+        checkpoint = await judge_project_cumulative(
+            project_name=project.display_name,
+            lifecycle=project.lifecycle_state.value,
+            as_of_date=as_of_date,
+            coverage_start=coverage_start,
+            deep_signals=deep_signals,
+            shallow=shallow,
+            judge=cumulative_judge,
+            prior=prior_context,
+        )
+        if checkpoint.is_failure:
+            return None
+
+        # Not routed through _document(): its own first parameter is named
+        # "model", which collides with CumulativeCheckpointDocument's model
+        # field (the LLM model name).
+        doc = CumulativeCheckpointDocument.model_construct(
+            id=str(new_id()),
+            project_id=project_id,
+            as_of_date=as_of_date,
+            as_of_week_start=as_of_week_start,
+            coverage_start=coverage_start,
+            signal_version=CUMULATIVE_VERSION,
+            generated_at=now,
+            model=checkpoint.model,
+            status=checkpoint.status,
+            confidence=checkpoint.confidence,
+            trajectory=checkpoint.trajectory,
+            headline=checkpoint.headline,
+            narrative=checkpoint.narrative,
+            work_to_date=checkpoint.work_to_date,
+            milestones=checkpoint.milestones,
+            open_concerns=checkpoint.open_concerns,
+            recommendations=checkpoint.recommendations,
+            data_gaps=checkpoint.data_gaps,
+            weeks_deep_judged=sorted({week_start for week_start, _ in deep_signals}),
+            weeks_shallow_counts={k.isoformat(): v for k, v in (shallow.weeks_counts if shallow else {}).items()},
+            source_snapshot_ids=source_snapshot_ids,
+            prior_checkpoint_id=str(prior_doc.id) if (use_prior_context and prior_doc and prior_doc.id) else None,
+            chain_depth=new_chain_depth,
+            history_truncated=history_truncated,
+            is_provisional=is_provisional,
+        )
+        await database.add("cumulative_checkpoints", doc)
+        return doc
 
 
 class ScheduledJobHooks:

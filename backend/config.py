@@ -123,6 +123,37 @@ class Settings(BaseSettings):
         le=300.0,
         validation_alias=AliasChoices("PHI_LAZY_COMPUTE_TIMEOUT_SECONDS", "LAZY_COMPUTE_TIMEOUT_SECONDS"),
     )
+    # Cumulative progress-as-of-date (backend.cumulative_llm / generate_cumulative_checkpoint)
+    llm_cumulative_model: str = Field(
+        default="gpt-4o",
+        min_length=1,
+        max_length=120,
+        validation_alias=AliasChoices("PHI_LLM_CUMULATIVE_MODEL", "LLM_CUMULATIVE_MODEL"),
+    )
+    cumulative_deep_tail_weeks: int = Field(
+        default=4,
+        ge=1,
+        le=12,
+        validation_alias=AliasChoices("PHI_CUMULATIVE_DEEP_TAIL_WEEKS", "CUMULATIVE_DEEP_TAIL_WEEKS"),
+    )
+    cumulative_compute_timeout_seconds: float = Field(
+        default=90.0,
+        ge=1.0,
+        le=300.0,
+        validation_alias=AliasChoices("PHI_CUMULATIVE_COMPUTE_TIMEOUT_SECONDS", "CUMULATIVE_COMPUTE_TIMEOUT_SECONDS"),
+    )
+    cumulative_provisional_ttl_minutes: int = Field(
+        default=360,
+        ge=1,
+        le=10_080,
+        validation_alias=AliasChoices("PHI_CUMULATIVE_PROVISIONAL_TTL_MINUTES", "CUMULATIVE_PROVISIONAL_TTL_MINUTES"),
+    )
+    cumulative_chain_rebuild_depth: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("PHI_CUMULATIVE_CHAIN_REBUILD_DEPTH", "CUMULATIVE_CHAIN_REBUILD_DEPTH"),
+    )
 
     gitea_url: str | None = Field(
         default=None,
