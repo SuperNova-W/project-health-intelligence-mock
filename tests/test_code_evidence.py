@@ -192,3 +192,19 @@ def test_tier2_selects_largest_commits_first_when_over_budget() -> None:
     # Both fit under the default 60KB budget, but confirm selection order was largest-first.
     assert client.diff_calls[0] == "large"
     assert client.diff_calls[1] == "small"
+
+
+def test_commits_outside_the_window_are_dropped_even_if_gitea_returns_them() -> None:
+    """Regression: Gitea's server-side since/until on /commits is not reliably
+    restrictive on its own (confirmed against the real deployed instance --
+    a request scoped to one week returned a commit from ~7 weeks later)."""
+    commits = [
+        _commit("in1234567", "in-window commit", "2026-03-04T00:00:00Z"),
+        _commit("out123456", "way outside the requested week", "2026-04-28T00:00:00Z"),
+    ]
+    meta = {"in1234567": _meta(additions=3, deletions=1, files=[{"filename": "README.md", "status": "modified"}])}
+    client = FakeGiteaClient(commits=commits, meta_by_sha=meta)
+    reader = _reader(client)
+    evidence = reader.week_evidence(project_id="p1", repo_slugs=["r1"], week_start=WEEK_START, week_end=WEEK_END)
+    shas = {commit.sha for commit in evidence.repos[0].commits}
+    assert shas == {"in1234567"}

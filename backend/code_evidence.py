@@ -300,7 +300,18 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
                 evidence.fetch_errors.append(f"commit list fetch failed: {exc}")
                 repos.append(evidence)
                 continue
-            for raw in raw_commits[: self.limits.max_commits_per_repo]:
+            # Gitea's server-side since/until on /commits is not reliably
+            # restrictive on its own (confirmed against the real instance --
+            # commits well outside the requested week came back), so this
+            # mirrors GiteaRepoActivityAdapter's own client-side re-check
+            # (ingestion.py's per-commit since/until filter) rather than
+            # trusting the raw response.
+            in_window_commits = [
+                raw for raw in raw_commits
+                if (when := _parse_gitea_datetime((raw.get("commit") or {}).get("committer", {}).get("date"))) is not None
+                and since <= when <= until
+            ]
+            for raw in in_window_commits[: self.limits.max_commits_per_repo]:
                 fact = self._commit_fact(repo_slug, raw)
                 if fact is not None:
                     evidence.commits.append(fact)

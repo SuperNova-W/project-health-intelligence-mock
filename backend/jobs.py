@@ -1084,7 +1084,7 @@ async def generate_llm_snapshot(
         commit_dates = {commit.committed_at.date() for commit in non_noise if commit.committed_at}
         active_days = len(commit_dates)
         last_commit_date = max(commit_dates, default=None)
-        days_since_activity = (week_end - last_commit_date).days if last_commit_date else None
+        days_since_activity = max(0, (week_end - last_commit_date).days) if last_commit_date else None
         if evidence is None:
             completeness = 0.0
         elif not non_noise:
