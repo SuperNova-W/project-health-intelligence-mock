@@ -59,6 +59,8 @@ const state = {
   calendarLoading: false,
   calendarError: null,
   calendarResult: null,
+  calendarComputing: new Set(),
+  calendarComputeErrors: {},
 };
 
 let currentView = 'overview';
@@ -726,8 +728,26 @@ function calendarPanelMarkup() {
   if (state.calendarError) return `<section class="panel calendar-panel">${errorPanel(state.calendarError.message || 'That date could not be loaded.', 'retry-calendar')}</section>`;
   const result = state.calendarResult;
   const items = result?.projects || [];
+  const missing = new Set(result?.missingProjectIds || []);
+  const computable = Boolean(result?.computable);
   const weekLabel = result?.snapshotWeekStart ? `${formatDate(result.snapshotWeekStart)} – ${formatDate(result.snapshotWeekEnd)}` : null;
-  return `<section class="panel calendar-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio as of ${escapeHtml(formatDate(state.calendarDate))}</h2><p class="panel-subtitle">${weekLabel ? `Week of ${escapeHtml(weekLabel)} · the verdict as it was judged that week, not re-scored against today's rules.` : 'No snapshot has been computed for this week.'}</p></div></div><div class="queue-list">${items.length ? items.map((project) => `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`).join('') : '<div class="history-empty" style="padding:20px;">No projects to show.</div>'}</div></section>`;
+  const rowMarkup = (project) => {
+    const isMissing = missing.has(project.id);
+    if (isMissing) {
+      const isComputing = state.calendarComputing.has(project.id);
+      const computeError = state.calendarComputeErrors[project.id];
+      const action = isComputing
+        ? '<span class="queue-action compute-pending"><span class="spinner"></span> Computing…</span>'
+        : computeError
+          ? `<button class="queue-action compute-week-retry" data-project-id="${escapeHtml(project.id)}">Could not compute — Retry</button>`
+          : computable
+            ? `<button class="queue-action compute-week" data-project-id="${escapeHtml(project.id)}">Compute this week</button>`
+            : '<span class="queue-action compute-disabled">LLM signal not configured</span>';
+      return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span></div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><span class="mono">No snapshot computed for this week yet.</span></div>${action}</div>`;
+    }
+    return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`;
+  };
+  return `<section class="panel calendar-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio as of ${escapeHtml(formatDate(state.calendarDate))}</h2><p class="panel-subtitle">${weekLabel ? `Week of ${escapeHtml(weekLabel)} · the verdict as it was judged that week, not re-scored against today's rules.` : 'No snapshot has been computed for this week.'}</p></div></div><div class="queue-list">${items.length ? items.map(rowMarkup).join('') : '<div class="history-empty" style="padding:20px;">No projects to show.</div>'}</div></section>`;
 }
 
 function renderOverview() {
@@ -859,11 +879,15 @@ async function loadCalendarSnapshot(dateStr) {
   state.calendarDate = dateStr;
   state.calendarLoading = true;
   state.calendarError = null;
+  state.calendarComputing = new Set();
+  state.calendarComputeErrors = {};
   render();
   try {
     const raw = await requestJson(`/snapshots/at?date=${encodeURIComponent(dateStr)}`);
     state.calendarResult = normalizeSnapshot(raw);
     state.calendarResult.hasData = Boolean(raw?.has_data);
+    state.calendarResult.missingProjectIds = asArray(raw?.missing_project_ids);
+    state.calendarResult.computable = Boolean(raw?.computable);
     state.calendarLoading = false;
     render();
   } catch (error) {
@@ -873,10 +897,30 @@ async function loadCalendarSnapshot(dateStr) {
   }
 }
 
+async function computeCalendarProjectSnapshot(projectId) {
+  if (!state.calendarDate || state.calendarComputing.has(projectId)) return;
+  state.calendarComputing.add(projectId);
+  delete state.calendarComputeErrors[projectId];
+  render();
+  try {
+    const raw = await requestJson(`/projects/${encodeURIComponent(projectId)}/snapshots/at?date=${encodeURIComponent(state.calendarDate)}`, { method: 'POST' });
+    const updated = normalizeProject(raw?.project, state.calendarResult || {});
+    const projects = state.calendarResult.projects.map((project) => (project.id === projectId ? updated : project));
+    state.calendarResult = { ...state.calendarResult, projects, missingProjectIds: state.calendarResult.missingProjectIds.filter((id) => id !== projectId) };
+  } catch (error) {
+    state.calendarComputeErrors[projectId] = error;
+  } finally {
+    state.calendarComputing.delete(projectId);
+    render();
+  }
+}
+
 function clearCalendarSnapshot() {
   state.calendarDate = null;
   state.calendarResult = null;
   state.calendarError = null;
+  state.calendarComputing = new Set();
+  state.calendarComputeErrors = {};
   render();
 }
 
@@ -986,6 +1030,10 @@ function bindViewEvents() {
   });
   document.getElementById('calendar-clear')?.addEventListener('click', clearCalendarSnapshot);
   document.getElementById('retry-calendar')?.addEventListener('click', () => { if (state.calendarDate) loadCalendarSnapshot(state.calendarDate); });
+  document.querySelectorAll('.compute-week, .compute-week-retry').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    computeCalendarProjectSnapshot(button.dataset.projectId);
+  }));
   document.querySelectorAll('.view-project').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
     selectedProjectId = button.dataset.projectId;
