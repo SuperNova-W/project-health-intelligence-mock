@@ -11,9 +11,16 @@
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
     <script>
-      // Points the deployed Vercel frontend at the Render-hosted API.
-      // Update this if the Render service is renamed or moves to a custom domain.
-      window.PHI_API_BASE = 'https://project-health-intelligence-mock-2.onrender.com';
+      // The dashboard runs in two places: `python -m http.server` on localhost
+      // during development, and Vercel in production. Deriving the API base
+      // from the page's own hostname means neither one needs editing before a
+      // commit -- this line used to be a manual toggle, commented out for
+      // local testing and restored before deploying, and missing that step
+      // silently pointed the deployed page at the viewer's own machine.
+      // location.hostname is '' when the file is opened directly (file://).
+      window.PHI_API_BASE = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname)
+        ? 'http://127.0.0.1:8000'
+        : 'https://project-health-intelligence-mock-2.onrender.com';
     </script>
   </head>
   <body>
