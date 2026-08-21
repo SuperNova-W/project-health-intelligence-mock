@@ -9,6 +9,7 @@ validated.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -16,6 +17,9 @@ from datetime import date, datetime, timedelta, timezone
 from math import ceil
 from typing import Any
 
+import anyio
+
+from .code_evidence import GiteaCodeEvidenceReader
 from .config import Settings, get_settings
 from .db import get_active_repository
 from .ingestion import (
@@ -28,6 +32,7 @@ from .models import (
     AggregateMetrics,
     AttentionStatus,
     EvidenceReference,
+    RepoActivityDocument,
     WarningDocument,
     WarningEvidenceItem,
     WarningSeverity,
@@ -36,6 +41,7 @@ from .models import (
 )
 from .resolvers import build_boundary_resolver, build_team_size_resolver
 from .rules import evaluate_mvp_rules
+from .signal_llm import SIGNAL_VERSION, WeeklySignal, WeeklySignalJudge, judge_project_week
 from .staging import (
     REPO_ACTIVITY_STAGING_COLLECTION,
     fold_people_portal_catalog,
@@ -885,6 +891,376 @@ async def run_weekly_snapshot_job(
         "snapshots_written": created,
         "outbound_notifications": False,
     }
+
+
+# ---------------------------------------------------------------------------
+# LLM-judged weekly signal (backend.signal_llm) -- lazy per-project-week
+# ---------------------------------------------------------------------------
+
+_LLM_SNAPSHOT_LOCKS: dict[tuple[str, date], asyncio.Lock] = {}
+_LLM_SNAPSHOT_LOCKS_GUARD = asyncio.Lock()
+
+
+async def _llm_snapshot_lock(key: tuple[str, date]) -> asyncio.Lock:
+    async with _LLM_SNAPSHOT_LOCKS_GUARD:
+        if len(_LLM_SNAPSHOT_LOCKS) > 256:
+            _LLM_SNAPSHOT_LOCKS.clear()
+        return _LLM_SNAPSHOT_LOCKS.setdefault(key, asyncio.Lock())
+
+
+async def build_code_evidence_reader(
+    settings: Settings,
+    database: Any,
+    project_id: str,
+    *,
+    at: date,
+) -> tuple[GiteaCodeEvidenceReader, list[str]] | None:
+    """Resolve a project's repos/org as of ``at`` and build a diff reader for them.
+
+    Point-in-time, like ``build_gitea_adapters``: a repo added to the
+    boundary after the week being judged must not leak into that week's
+    evidence. Returns ``None`` (no network call made) when there's no
+    boundary or it maps to zero repos.
+    """
+    boundary = await database.boundary_at(project_id, at)
+    if boundary is None:
+        return None
+    excluded = set(getattr(boundary, "excluded_repos", None) or [])
+    repo_slugs = [
+        ref.repo_slug
+        for ref in list(boundary.primary_repos) + list(getattr(boundary, "shared_repos", None) or [])
+        if ref.repo_slug not in excluded
+    ]
+    repo_slugs = list(dict.fromkeys(repo_slugs))
+    if not repo_slugs:
+        return None
+    org = settings.gitea_org or boundary.root_authentik_team_id
+    reader = GiteaCodeEvidenceReader(base_url=settings.gitea_url, token=settings.gitea_api_token, organization=org)
+    return reader, repo_slugs
+
+
+def _latest_llm_snapshot(snapshots: Sequence[Any], project_id: str, before: date) -> Any | None:
+    candidates = [
+        snap for snap in snapshots
+        if str(snap.project_id) == project_id and snap.signal_source == "llm" and snap.week_start < before
+    ]
+    return max(candidates, key=lambda snap: (snap.week_start, snap.generated_at), default=None)
+
+
+def _severity_enum(value: str) -> WarningSeverity:
+    return {
+        "info": WarningSeverity.INFO,
+        "warning": WarningSeverity.WARNING,
+        "critical": WarningSeverity.CRITICAL,
+    }.get(value, WarningSeverity.INFO)
+
+
+async def generate_llm_snapshot(
+    project_id: str,
+    week_start: date,
+    *,
+    settings: Settings | None = None,
+    database: Any = None,
+    judge: WeeklySignalJudge | None = None,
+) -> WeeklySnapshotDocument | None:
+    """Compute, or return the already-cached, LLM-judged snapshot for one project-week.
+
+    ``None`` means nothing could be computed and nothing was persisted --
+    ``weekly_snapshots`` is immutable, so a failed judgment is deliberately
+    never written; a later retry can still produce a real verdict. This is
+    the function the "Compute this week" button and the weekly cron both
+    call; the per-(project, week) lock means two concurrent callers pay for
+    at most one OpenAI call.
+    """
+    settings = settings or get_settings()
+    database = database or get_active_repository()
+    week_end = week_start + timedelta(days=6)
+
+    lock = await _llm_snapshot_lock((project_id, week_start))
+    async with lock:
+        all_snapshots = await database.list("snapshots")
+        existing = [
+            snap for snap in all_snapshots
+            if str(snap.project_id) == project_id and snap.week_start == week_start and snap.rule_set_version == SIGNAL_VERSION
+        ]
+        if existing:
+            return existing[0]
+
+        project = await database.get_project(project_id)
+        if project is None:
+            return None
+        now = _utc_now()
+        decision = project.scoring_decision(week_start, week_end)
+        if decision.suppressed:
+            snapshot = _document(
+                WeeklySnapshotDocument,
+                id=str(new_id()),
+                project_id=project_id,
+                week_start=week_start,
+                week_end=week_end,
+                rule_set_version=SIGNAL_VERSION,
+                generated_at=now,
+                attention_status=decision.status or AttentionStatus.PLANNED_PAUSE,
+                data_completeness_pct=0,
+                last_sync_at=None,
+                metrics=AggregateMetrics(),
+                baselines=None,
+                warning_ids=[],
+                series={},
+                series_baselines={},
+                signal_source="llm",
+                signal_headline="Planned pause",
+                signal_summary="This project has a recorded pause for this week; signals are suppressed by policy.",
+                signal_confidence=1.0,
+                signal_work_volume="none",
+            )
+            await database.add("snapshots", snapshot)
+            return snapshot
+
+        is_new_project = not any(str(snap.project_id) == project_id for snap in all_snapshots)
+        built = await build_code_evidence_reader(settings, database, project_id, at=week_start)
+        evidence = None
+        if built is not None:
+            reader, repo_slugs = built
+            try:
+                evidence = await anyio.to_thread.run_sync(
+                    lambda: reader.week_evidence(
+                        project_id=project_id, repo_slugs=repo_slugs, week_start=week_start, week_end=week_end
+                    )
+                )
+            finally:
+                closer = getattr(reader, "close", None)
+                if closer is not None:
+                    closer()
+
+        prior_doc = _latest_llm_snapshot(all_snapshots, project_id, week_start)
+        prior_signal = None
+        if prior_doc is not None and prior_doc.signal_headline:
+            prior_signal = WeeklySignal(
+                status=prior_doc.attention_status,
+                confidence=prior_doc.signal_confidence or 0.5,
+                headline=prior_doc.signal_headline,
+                summary=prior_doc.signal_summary or "",
+                work_volume=prior_doc.signal_work_volume or "none",
+            )
+
+        if evidence is None:
+            signal = WeeklySignal(
+                status=AttentionStatus.INSUFFICIENT_DATA,
+                confidence=0.0,
+                headline="No repositories mapped",
+                summary="This project has no repositories mapped for this week.",
+                work_volume="none",
+            )
+        else:
+            signal = await judge_project_week(
+                evidence,
+                project_name=project.display_name,
+                lifecycle=project.lifecycle_state.value,
+                judge=judge,
+                prior=prior_signal,
+                is_new_project=is_new_project,
+            )
+
+        if signal.is_failure:
+            return None
+
+        non_noise = evidence.non_noise_commits if evidence else []
+        commit_dates = {commit.committed_at.date() for commit in non_noise if commit.committed_at}
+        active_days = len(commit_dates)
+        last_commit_date = max(commit_dates, default=None)
+        days_since_activity = (week_end - last_commit_date).days if last_commit_date else None
+        if evidence is None:
+            completeness = 0.0
+        elif not non_noise:
+            completeness = 100.0
+        else:
+            errors = evidence.total_fetch_errors
+            completeness = round(max(0.0, min(100.0, (1.0 - errors / len(non_noise)) * 100)), 1)
+
+        metrics = AggregateMetrics(
+            active_days=active_days,
+            days_since_activity=days_since_activity,
+            data_completeness_pct=completeness,
+            last_sync_at=now,
+        )
+
+        history = sorted(
+            (
+                snap for snap in all_snapshots
+                if str(snap.project_id) == project_id and snap.week_start < week_start
+            ),
+            key=lambda snap: (snap.week_start, snap.generated_at),
+        )[-7:]
+        activity_series: list[float | int | None] = [
+            (snap.metrics.active_days if snap.metrics else None) for snap in history
+        ] + [active_days]
+        activity_series = ([None] * max(0, 8 - len(activity_series)) + activity_series)[-8:]
+
+        snapshot_id = new_id()
+        warning_documents: list[WarningDocument] = []
+        repo_activity_ids: dict[str, str] = {}
+        if evidence is not None:
+            for repo in evidence.repos:
+                repo_active_days = len({
+                    commit.committed_at.date()
+                    for commit in repo.commits
+                    if commit.committed_at and not commit.is_noise_only
+                })
+                repo_doc = _document(
+                    RepoActivityDocument,
+                    id=str(new_id()),
+                    project_id=project_id,
+                    gitea_repo_id=repo.repo_slug,
+                    repo_slug=repo.repo_slug,
+                    window_start=week_start,
+                    window_end=week_end,
+                    synced_at=now,
+                    active_days=repo_active_days,
+                    data_completeness_pct=completeness,
+                    last_sync_at=now,
+                )
+                await database.add("repo_activity", repo_doc)
+                repo_activity_ids[repo.repo_slug] = str(repo_doc.id)
+
+            fallback_repo_id = next(iter(repo_activity_ids.values()), None)
+            for concern in signal.concerns:
+                refs = concern.get("evidence") or []
+                ref_repo = refs[0].split("@")[0].split("/")[0] if refs else None
+                source_id = repo_activity_ids.get(ref_repo) or fallback_repo_id
+                if source_id is None:
+                    continue
+                warning_documents.append(
+                    _document(
+                        WarningDocument,
+                        id=str(new_id()),
+                        snapshot_id=str(snapshot_id),
+                        project_id=project_id,
+                        rule_id="llm.weekly_signal",
+                        rule_version=SIGNAL_VERSION,
+                        signal_name=str(concern["text"])[:160],
+                        current_value=None,
+                        baseline_value=None,
+                        time_window=f"{week_start.isoformat()}..{week_end.isoformat()}",
+                        trigger_threshold=None,
+                        severity=_severity_enum(concern["severity"]),
+                        explanation=str(concern["text"]),
+                        data_freshness=now.isoformat(),
+                        data_completeness_pct=completeness,
+                        evidence=[
+                            WarningEvidenceItem(
+                                evidence_type="llm_signal",
+                                icon="sparkle",
+                                title=str(concern["text"])[:240],
+                                metric="llm_concern",
+                                current=concern["severity"],
+                                source_refs=[
+                                    EvidenceReference(
+                                        source_collection="repo_activity",
+                                        source_id=source_id,
+                                        source_field="commits",
+                                        observed_at=now,
+                                    )
+                                ],
+                            )
+                        ],
+                    )
+                )
+
+        snapshot = _document(
+            WeeklySnapshotDocument,
+            id=str(snapshot_id),
+            project_id=project_id,
+            week_start=week_start,
+            week_end=week_end,
+            rule_set_version=SIGNAL_VERSION,
+            generated_at=now,
+            attention_status=signal.status,
+            data_completeness_pct=metrics.data_completeness_pct or 0,
+            last_sync_at=now,
+            metrics=metrics,
+            baselines=None,
+            warning_ids=[warning.id for warning in warning_documents if warning.id is not None],
+            series={"activity": activity_series},
+            series_baselines={},
+            signal_source="llm",
+            signal_headline=signal.headline,
+            signal_summary=signal.summary,
+            signal_confidence=signal.confidence,
+            signal_work_volume=signal.work_volume,
+            signal_model=signal.model,
+            signal_recommendations=signal.recommendations,
+            signal_facts=[
+                {
+                    "kind": "commit",
+                    "repo_slug": commit.repo_slug,
+                    "sha": commit.sha,
+                    "subject": commit.subject,
+                    "files_changed": len(commit.files),
+                    "additions": commit.additions,
+                    "deletions": commit.deletions,
+                }
+                for commit in non_noise
+            ][:60],
+        )
+        for warning in warning_documents:
+            await database.add("warnings", warning)
+        await database.add("snapshots", snapshot)
+        return snapshot
+
+
+async def generate_llm_weekly_snapshots(
+    settings: Settings | None = None,
+    database: Any = None,
+    *,
+    week_start: date | None = None,
+    concurrency: int = 3,
+) -> int:
+    """Compute the LLM signal for every project for one week (the Sunday-cron path).
+
+    Cache-read-before-compute in ``generate_llm_snapshot`` makes a mid-week
+    rerun a no-op for projects already computed -- "held for the week" falls
+    out of that for free, no extra flag needed.
+    """
+    settings = settings or get_settings()
+    database = database or get_active_repository()
+    now = _utc_now()
+    week_start = week_start or (now.date() - timedelta(days=now.weekday()))
+    projects = await database.list("projects")
+    judge = get_signal_judge(settings)
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    written = 0
+    lock = asyncio.Lock()
+
+    async def _run(project_id: str) -> None:
+        nonlocal written
+        async with semaphore:
+            try:
+                result = await asyncio.wait_for(
+                    generate_llm_snapshot(project_id, week_start, settings=settings, database=database, judge=judge),
+                    timeout=settings.lazy_compute_timeout_seconds,
+                )
+            except Exception:
+                return
+            if result is not None:
+                async with lock:
+                    written += 1
+
+    await asyncio.gather(*(_run(str(project.project_id)) for project in projects))
+    return written
+
+
+def get_signal_judge(settings: Settings) -> WeeklySignalJudge | None:
+    """Build a ``WeeklySignalJudge`` if LLM enrichment is configured, else ``None``."""
+    if not settings.llm_active:
+        return None
+    try:
+        from .llm import OpenAIStructuredLLM
+
+        llm = OpenAIStructuredLLM(api_key=settings.openai_api_key, timeout_s=settings.llm_signal_timeout_seconds)  # type: ignore[arg-type]
+        return WeeklySignalJudge(llm, model=settings.llm_signal_model)
+    except Exception:
+        return None
 
 
 class ScheduledJobHooks:

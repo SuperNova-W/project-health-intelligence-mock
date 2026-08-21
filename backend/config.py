@@ -103,6 +103,26 @@ class Settings(BaseSettings):
         le=120.0,
         validation_alias=AliasChoices("PHI_LLM_TIMEOUT_SECONDS", "LLM_TIMEOUT_SECONDS"),
     )
+    # LLM-judged weekly signal (backend.signal_llm) -- separate from the
+    # CI-assessment model/timeout above since diff-sized prompts run longer.
+    llm_signal_model: str = Field(
+        default="gpt-4o",
+        min_length=1,
+        max_length=120,
+        validation_alias=AliasChoices("PHI_LLM_SIGNAL_MODEL", "LLM_SIGNAL_MODEL"),
+    )
+    llm_signal_timeout_seconds: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=180.0,
+        validation_alias=AliasChoices("PHI_LLM_SIGNAL_TIMEOUT_SECONDS", "LLM_SIGNAL_TIMEOUT_SECONDS"),
+    )
+    lazy_compute_timeout_seconds: float = Field(
+        default=90.0,
+        ge=1.0,
+        le=300.0,
+        validation_alias=AliasChoices("PHI_LAZY_COMPUTE_TIMEOUT_SECONDS", "LAZY_COMPUTE_TIMEOUT_SECONDS"),
+    )
 
     gitea_url: str | None = Field(
         default=None,
