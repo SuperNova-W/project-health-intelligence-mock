@@ -23,15 +23,17 @@ from .ci_llm import (
     decompose_spec,
 )
 from .config import Settings, get_settings
+from .cumulative_llm import CUMULATIVE_VERSION
 from .llm import OpenAIStructuredLLM, LLMUnavailable
 from .db import get_active_repository
-from .jobs import generate_llm_snapshot, get_signal_judge
+from .jobs import generate_cumulative_checkpoint, generate_llm_snapshot, get_signal_judge
 from .signal_llm import SIGNAL_VERSION
 from .models import (
     AttentionStatus,
     AuditLogDocument,
     BoundaryDocument,
     BoundaryView,
+    CumulativeCheckpointDocument,
     FeedbackCategory,
     FeedbackDocument,
     HealthAssessmentView,
@@ -452,6 +454,125 @@ async def compute_project_snapshot_at_date(
             detail="the LLM judgment could not be completed for this week",
         )
     return {"project": await _project_response(project, snapshot), "computed": True, "cached": False}
+
+
+async def _progress_project_response(project: Any, checkpoint: CumulativeCheckpointDocument | None) -> dict[str, Any]:
+    """Shape one project's row for the Projects-page cumulative-progress calendar.
+
+    Deliberately a separate, purpose-built shape from ``_project_response``
+    (which expects a ``WeeklySnapshotDocument``) rather than force-fitting a
+    checkpoint into that contract -- the two answer different questions and
+    the frontend surfaces for them are independent.
+    """
+    boundary = await _db().boundary_at(project.project_id)
+    base = {
+        "id": project.project_id,
+        "name": project.display_name,
+        "short": project.display_name[:2].upper(),
+        "team": boundary.root_authentik_team_id if boundary else "Unassigned",
+        "repo": boundary.primary_repos[0].repo_slug if boundary and boundary.primary_repos else "—",
+    }
+    if checkpoint is None:
+        return {
+            **base,
+            "status": "Insufficient data", "statusClass": "data",
+            "headline": "No progress computed yet", "narrative": "", "trajectory": "unknown",
+            "confidence": None, "workToDate": None, "milestones": [], "openConcerns": [],
+            "recommendations": [], "dataGaps": [], "weeksDeepJudged": 0, "weeksTotal": 0,
+            "historyTruncated": False, "asOfDate": None, "generatedAt": None,
+            "isProvisional": False, "checkpointId": None,
+        }
+    status_value, status_class = _pretty_status(checkpoint.status)
+    return {
+        **base,
+        "status": status_value, "statusClass": status_class,
+        "headline": checkpoint.headline, "narrative": checkpoint.narrative,
+        "trajectory": checkpoint.trajectory, "confidence": checkpoint.confidence,
+        "workToDate": checkpoint.work_to_date,
+        "milestones": checkpoint.milestones, "openConcerns": checkpoint.open_concerns,
+        "recommendations": checkpoint.recommendations, "dataGaps": checkpoint.data_gaps,
+        "weeksDeepJudged": len(checkpoint.weeks_deep_judged),
+        "weeksTotal": len(checkpoint.weeks_deep_judged) + len(checkpoint.weeks_shallow_counts),
+        "historyTruncated": checkpoint.history_truncated,
+        "asOfDate": checkpoint.as_of_date, "generatedAt": checkpoint.generated_at,
+        "isProvisional": checkpoint.is_provisional, "checkpointId": _id(checkpoint.id),
+    }
+
+
+@router.get("/progress/at")
+async def progress_at_date(
+    on: date = Query(alias="date"),
+    user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Cache-only read of every project's cumulative-progress checkpoint as of a date.
+
+    Never computes -- mirrors ``snapshot_at_date``'s contract. The Projects-
+    page calendar reads this first, then automatically (no button) fans out
+    ``POST /projects/{id}/progress/at`` for whatever's in ``missing_project_ids``.
+    """
+    database = _db()
+    as_of_week_start = on - timedelta(days=on.weekday())
+    all_projects = await database.list("projects")
+    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    by_project: dict[str, CumulativeCheckpointDocument] = {}
+    for row in await database.list("cumulative_checkpoints"):
+        if row.as_of_week_start != as_of_week_start or row.signal_version != CUMULATIVE_VERSION:
+            continue
+        current = by_project.get(row.project_id)
+        if current is None or row.generated_at > current.generated_at:
+            by_project[row.project_id] = row
+    items: list[dict[str, Any]] = []
+    for project_id in ids:
+        project = await database.get_project(project_id)
+        if project:
+            items.append(await _progress_project_response(project, by_project.get(project_id)))
+    settings = get_settings()
+    return {
+        "date": on,
+        "as_of_week_start": as_of_week_start,
+        "missing_project_ids": [pid for pid in ids if pid not in by_project],
+        "computable": bool(settings.llm_active),
+        "projects": items,
+    }
+
+
+@router.post("/projects/{project_id}/progress/at")
+async def compute_project_progress_at_date(
+    project_id: str,
+    on: date = Query(alias="date"),
+    user: AuthUser = Depends(require_project_access),
+) -> dict[str, Any]:
+    """Bounded compute of one project's cumulative progress as of a date.
+
+    This is what the Projects-page calendar automatically fans out to, one
+    request per project, when a date is picked -- there is deliberately no
+    portfolio-wide compute endpoint (see ``generate_cumulative_checkpoint``'s
+    docstring for why a single request covering every project would
+    reintroduce the unbounded-request problem this whole design avoids).
+    """
+    project = await _accessible_project(user, project_id)
+    settings = get_settings()
+    if not settings.llm_active:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM signal is not configured")
+
+    database = _db()
+    try:
+        checkpoint = await asyncio.wait_for(
+            generate_cumulative_checkpoint(project_id, on, settings=settings, database=database),
+            timeout=settings.cumulative_compute_timeout_seconds,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="still computing this project's progress -- a concurrent request may already be in flight, try again shortly",
+            headers={"Retry-After": "30"},
+        )
+    if checkpoint is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="the cumulative-progress synthesis could not be completed",
+        )
+    return {"project": await _progress_project_response(project, checkpoint), "computed": True}
 
 
 @router.get("/projects/{project_id}/snapshots")
