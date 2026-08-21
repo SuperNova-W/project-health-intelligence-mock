@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     Field,
     computed_field,
+    field_validator,
     model_validator,
 )
 
@@ -305,6 +306,12 @@ class RepoActivityDocument(PHIDocument):
     oldest_open_pr_days: float | None = Field(default=None, ge=0)
     review_latency_days: float | None = Field(default=None, ge=0)
     merged_count: int | None = Field(default=None, ge=0)
+    # Work that exists but has not reached the default branch. The rest of this
+    # system deliberately reads the default branch only, which makes a busy team
+    # on long-lived feature branches indistinguishable from an idle one; this
+    # count is the cheap portfolio-level correction for that blind spot.
+    branches_ahead: int | None = Field(default=None, ge=0)
+    open_issues: int | None = Field(default=None, ge=0)
     active_contributors: int | None = Field(default=None, ge=0)
     contributors: list[str] = Field(default_factory=list)
     team_size: int | None = Field(default=None, ge=0)
@@ -464,7 +471,17 @@ class CumulativeCheckpointDocument(PHIDocument):
 
     status: AttentionStatus
     confidence: float = Field(ge=0, le=1)
-    trajectory: Literal["accelerating", "steady", "slowing", "stalled", "unknown"] = "unknown"
+    # "stalled" was retired as a trajectory: it read as a verdict on the team
+    # when all it ever described was the merge stream, and "slowing" carries the
+    # same fact without the finality. Checkpoints persisted before the change
+    # still hold it, so it is coerced on load rather than failing validation.
+    trajectory: Literal["accelerating", "steady", "slowing", "unknown"] = "unknown"
+
+    @field_validator("trajectory", mode="before")
+    @classmethod
+    def _retire_stalled(cls, value: Any) -> Any:
+        return "slowing" if isinstance(value, str) and value.strip().lower() == "stalled" else value
+
     headline: str = Field(max_length=160)
     narrative: str = Field(max_length=2_000)
     work_to_date: str = Field(default="none", max_length=20)

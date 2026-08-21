@@ -169,6 +169,33 @@ def _record_week(record: Mapping[str, Any]) -> date | None:
     return None
 
 
+def _activity_completeness_rank(row: Any) -> tuple[int, str]:
+    """Order repo_activity rows for one (project, repo, week) key, best last.
+
+    A row carrying pull-request aggregates came from the Gitea sync; a row
+    without them was written by a commit-only path and must never shadow the
+    synced one.  Ties break on ``synced_at`` so the freshest sync wins.
+    """
+
+    has_pr_data = any(
+        _field(row, name) is not None
+        for name in ("open_prs", "merged_count", "oldest_open_pr_days", "review_latency_days")
+    )
+    synced_at = _field(row, "synced_at")
+    return (1 if has_pr_data else 0, str(synced_at or ""))
+
+
+def _best_activity_by_repo(rows: Sequence[Any]) -> dict[str, Any]:
+    """Collapse repo_activity rows to the most complete one per repo slug."""
+
+    best: dict[str, Any] = {}
+    for row in sorted(rows, key=_activity_completeness_rank):
+        slug = _field(row, "repo_slug")
+        if slug:
+            best[str(slug)] = row
+    return best
+
+
 def _history_by_project(rows: Sequence[Any]) -> dict[str, list[dict[str, Any]]]:
     buckets: dict[tuple[str, str], list[Any]] = defaultdict(list)
     for row in rows:
@@ -1108,11 +1135,36 @@ async def generate_llm_snapshot(
             errors = evidence.total_fetch_errors
             completeness = round(max(0.0, min(100.0, (1.0 - errors / len(non_noise)) * 100)), 1)
 
+        # The code-evidence reader is commit-only, so the pull-request
+        # aggregates have to come from the repo_activity rows the Gitea sync
+        # already wrote for this same week. Without this the "Project
+        # aggregates" panel renders "--" for counts that were really synced,
+        # including legitimate zeros.
+        week_rows = [
+            row
+            for row in await database.list("repo_activity")
+            if str(_field(row, "project_id")) == project_id
+            and _field(row, "window_start") == week_start
+        ]
+        # ``repo_activity`` is a one-row-per-(project, repo, week) projection
+        # (see ``fold_staging_activity``); fold additively over a duplicated
+        # key and the week's active_days doubles.  Collapse to the best row
+        # per repo before folding so a stray duplicate cannot inflate it.
+        existing_activity = _best_activity_by_repo(week_rows)
+        week_activity = list(existing_activity.values())
+        folded = _history_by_project(week_activity).get(project_id) if week_activity else None
+        pr_metrics = {
+            key: value
+            for key, value in (folded[-1] if folded else {}).items()
+            if key in ("open_prs", "merged_count", "oldest_open_pr_days", "review_latency_days")
+        }
+
         metrics = AggregateMetrics(
             active_days=active_days,
             days_since_activity=days_since_activity,
             data_completeness_pct=completeness,
             last_sync_at=now,
+            **pr_metrics,
         )
 
         history = sorted(
@@ -1135,6 +1187,18 @@ async def generate_llm_snapshot(
         repo_activity_ids: dict[str, str] = {}
         if evidence is not None:
             for repo in evidence.repos:
+                # ``repo_activity`` holds exactly one row per (project, repo,
+                # week).  When the Gitea sync already wrote this week's row,
+                # point the evidence at it and write nothing: a second,
+                # commit-only row would carry no pull-request aggregates,
+                # double-count active_days in every additive fold, and shadow
+                # the synced row for anything that reads an arbitrary match.
+                existing_row = existing_activity.get(repo.repo_slug)
+                if existing_row is not None:
+                    existing_id = _record_id(existing_row)
+                    if existing_id:
+                        repo_activity_ids[repo.repo_slug] = existing_id
+                        continue
                 repo_active_days = len({
                     commit.committed_at.date()
                     for commit in repo.commits
@@ -1334,7 +1398,13 @@ def _iso_week_start(value: date) -> date:
 
 
 def _checkpoint_to_context(doc: CumulativeCheckpointDocument) -> CumulativeCheckpoint:
-    """Minimal reconstruction of a persisted checkpoint for use as prior context."""
+    """Reconstruction of a persisted checkpoint for use as prior context.
+
+    Carries milestones/open_concerns too: on the incremental ("warm") path
+    the prior checkpoint is the only record of everything before the newly
+    judged weeks, so dropping its grounded findings leaves the synthesis
+    with nothing to build on.
+    """
     return CumulativeCheckpoint(
         status=doc.status,
         confidence=doc.confidence,
@@ -1342,19 +1412,43 @@ def _checkpoint_to_context(doc: CumulativeCheckpointDocument) -> CumulativeCheck
         headline=doc.headline,
         narrative=doc.narrative,
         work_to_date=doc.work_to_date,
+        milestones=list(doc.milestones),
+        open_concerns=list(doc.open_concerns),
     )
 
 
-def _snapshot_to_weekly_signal(snapshot: WeeklySnapshotDocument) -> WeeklySignal:
+def _warnings_to_concerns(warnings: Sequence[Any], week_start: date) -> list[dict[str, Any]]:
+    """Rebuild a week's ``concerns`` from the ``WarningDocument`` rows it wrote.
+
+    The concern *text* and severity survive persistence; the LLM's original
+    ``repo/path@sha`` evidence strings do not (a warning's ``source_refs``
+    point at ``repo_activity`` rows instead), so each concern is grounded
+    with the plain week reference the cumulative prompt's rule 4 allows.
+    """
+    concerns: list[dict[str, Any]] = []
+    for warning in warnings:
+        text = str(_field(warning, "explanation") or _field(warning, "signal_name") or "").strip()
+        if not text:
+            continue
+        severity = _field(warning, "severity")
+        concerns.append({
+            "text": text[:240],
+            "severity": getattr(severity, "value", str(severity or "info")),
+            "evidence": [f"week {week_start.isoformat()}"],
+        })
+    return concerns
+
+
+def _snapshot_to_weekly_signal(
+    snapshot: WeeklySnapshotDocument,
+    concerns: Sequence[dict[str, Any]] | None = None,
+) -> WeeklySignal:
     """Rehydrate just enough of a WeeklySignal from a persisted snapshot.
 
-    ``concerns``/``what_changed`` aren't stored structurally on
-    ``WeeklySnapshotDocument`` (they became ``WarningDocument`` rows
-    instead), so they come back empty here regardless of whether the
-    snapshot was just computed or read from cache -- the cumulative
-    prompt still gets each week's headline/status, and its own grounding
-    rule allows a plain week-date reference when no finer-grained
-    evidence is available.
+    ``concerns`` come back via ``_warnings_to_concerns`` from the snapshot's
+    ``WarningDocument`` rows -- without them the cumulative prompt saw only
+    one headline line per week and had nothing concrete to synthesize from.
+    ``what_changed`` is genuinely not persisted anywhere and stays empty.
     """
     return WeeklySignal(
         status=snapshot.attention_status,
@@ -1362,6 +1456,7 @@ def _snapshot_to_weekly_signal(snapshot: WeeklySnapshotDocument) -> WeeklySignal
         headline=snapshot.signal_headline or "(no headline)",
         summary=snapshot.signal_summary or "",
         work_volume=snapshot.signal_work_volume or "none",
+        concerns=list(concerns or []),
     )
 
 
@@ -1453,8 +1548,22 @@ async def generate_cumulative_checkpoint(
                 )
 
         deep_snapshots = await asyncio.gather(*(_judge_week(week_start) for week_start in deep_week_starts))
+
+        # One pass over warnings, indexed by snapshot, so every deep week
+        # below carries its own findings into the synthesis prompt.
+        warnings_by_snapshot: dict[str, list[Any]] = defaultdict(list)
+        for warning in await database.list("warnings"):
+            if str(_field(warning, "project_id")) == project_id:
+                warnings_by_snapshot[str(_field(warning, "snapshot_id"))].append(warning)
+
+        def _signal_for(snapshot: WeeklySnapshotDocument) -> WeeklySignal:
+            week_warnings = warnings_by_snapshot.get(str(snapshot.id), []) if snapshot.id is not None else []
+            return _snapshot_to_weekly_signal(
+                snapshot, _warnings_to_concerns(week_warnings, snapshot.week_start)
+            )
+
         deep_signals: list[tuple[date, WeeklySignal]] = [
-            (snapshot.week_start, _snapshot_to_weekly_signal(snapshot))
+            (snapshot.week_start, _signal_for(snapshot))
             for snapshot in deep_snapshots
             if snapshot is not None
         ]
@@ -1492,7 +1601,7 @@ async def generate_cumulative_checkpoint(
                         and coverage_start <= snap.week_start <= shallow_end
                         and snap.week_start not in deep_weeks_seen
                     ):
-                        deep_signals.append((snap.week_start, _snapshot_to_weekly_signal(snap)))
+                        deep_signals.append((snap.week_start, _signal_for(snap)))
                         if snap.id is not None:
                             source_snapshot_ids.append(str(snap.id))
                         deep_weeks_seen.add(snap.week_start)

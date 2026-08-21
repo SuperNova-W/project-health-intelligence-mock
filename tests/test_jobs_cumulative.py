@@ -8,10 +8,10 @@ from typing import Any
 import pytest
 
 from backend.code_evidence import CommitFact, HistoryMetadata, RepoCodeEvidence, WeekCodeEvidence
-from backend.cumulative_llm import CumulativeCheckpoint
+from backend.cumulative_llm import CUMULATIVE_VERSION, CumulativeCheckpoint
 from backend.db import SqliteStore
-from backend.jobs import generate_cumulative_checkpoint
-from backend.models import AttentionStatus
+from backend.jobs import _checkpoint_to_context, generate_cumulative_checkpoint
+from backend.models import AttentionStatus, CumulativeCheckpointDocument
 from backend.signal_llm import WeeklySignalJudge
 
 # Fixed "today" for these tests, matched against generate_cumulative_checkpoint's
@@ -211,3 +211,25 @@ async def test_all_quiet_deep_weeks_still_synthesizes_a_real_checkpoint(in_memor
     assert doc is not None
     assert cumulative_llm.calls == 1
     assert doc.weeks_deep_judged
+
+
+def test_checkpoint_to_context_carries_grounded_findings() -> None:
+    """Prior context must keep milestones/concerns, not just the headline.
+
+    On the incremental path the prior checkpoint is the only record of
+    everything before the newly judged weeks; dropping its grounded
+    findings left the synthesis with nothing to build on.
+    """
+
+    doc = CumulativeCheckpointDocument.model_construct(
+        id="c1", project_id="proj", as_of_date=date(2026, 5, 4), as_of_week_start=date(2026, 5, 4),
+        coverage_start=date(2026, 1, 1), signal_version=CUMULATIVE_VERSION,
+        status=AttentionStatus.WATCH, confidence=0.8, trajectory="steady",
+        headline="Steady delivery", narrative="Real work happened.", work_to_date="substantial",
+        milestones=[{"text": "Parser landed", "evidence": ["repo/parse.py@abc1234"]}],
+        open_concerns=[{"text": "No tests", "severity": "warning", "evidence": ["repo/parse.py@abc1234"]}],
+    )
+    context = _checkpoint_to_context(doc)
+    assert context.work_to_date == "substantial"
+    assert context.milestones == doc.milestones
+    assert context.open_concerns == doc.open_concerns

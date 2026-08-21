@@ -9,7 +9,9 @@ import pytest
 
 from backend.code_evidence import HistoryMetadata
 from backend.cumulative_llm import (
+    CumulativeCheckpoint,
     CumulativeCheckpointJudge,
+    build_checkpoint_user,
     judge_project_cumulative,
     no_history_checkpoint,
 )
@@ -191,3 +193,35 @@ async def test_placeholder_evidence_refs_are_rejected() -> None:
     )
     assert checkpoint.milestones == []
     assert checkpoint.open_concerns == []
+
+
+def test_prior_checkpoint_carries_its_substance_into_the_prompt() -> None:
+    """The prior block is the accumulated standing on the incremental path.
+
+    ``generate_cumulative_checkpoint``'s "warm" branch judges only the weeks
+    added since the prior checkpoint and skips the shallow sweep entirely,
+    so the prior IS the project's history for that call. Rendering only
+    "status - headline" left the model with one (often quiet) week and it
+    returned insufficient_data for projects with months of real work.
+    """
+
+    prior = CumulativeCheckpoint(
+        status=AttentionStatus.WATCH,
+        confidence=0.8,
+        trajectory="steady",
+        headline="Steady delivery on the parser",
+        narrative="The team shipped the parser and the ingest path over eight weeks.",
+        work_to_date="substantial",
+        milestones=[{"text": "Parser landed", "evidence": ["repo/parse.py@abc1234"]}],
+        open_concerns=[{"text": "No tests", "severity": "warning", "evidence": ["repo/parse.py@abc1234"]}],
+    )
+    user = build_checkpoint_user(
+        project_name="Proj", lifecycle="active", as_of_date=AS_OF, coverage_start=COVERAGE_START,
+        deep_signals=[_deep_signal(date(2026, 4, 20))], shallow=None, prior=prior,
+    )
+    assert "substantial" in user
+    assert "steady" in user
+    assert prior.narrative in user
+    assert "Parser landed" in user
+    assert "repo/parse.py@abc1234" in user
+    assert "No tests" in user

@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Any
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Which dotenv file to read, resolved once at import. Defaults to ``.env`` so
+# starting the server without a pre-loaded environment can no longer silently
+# come up with llm_active False and 503 every compute. Set PHI_ENV_FILE to a
+# different path to point elsewhere, or to "" to disable file loading entirely
+# -- tests do the latter (see tests/conftest.py) so a developer's real Gitea
+# URL and API keys can never leak into a test run.
+_ENV_FILE = os.environ.get("PHI_ENV_FILE", ".env") or None
 
 
 class Settings(BaseSettings):
@@ -14,12 +23,18 @@ class Settings(BaseSettings):
 
     ``sqlite_path`` may be a filesystem path or ``:memory:`` for ephemeral
     in-process storage (used in tests and local dev).
+
+    Precedence is pydantic-settings' usual order: explicit constructor
+    arguments beat real environment variables, which beat ``_ENV_FILE``,
+    which beats the defaults below.
     """
 
     model_config = SettingsConfigDict(
         env_prefix="",
         case_sensitive=False,
         extra="ignore",
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
     )
 
     app_name: str = "App Dev Horizon"

@@ -42,7 +42,7 @@ def _parse_date(value: str) -> date:
         raise argparse.ArgumentTypeError(f"expected an ISO date, got {value!r}") from error
 
 
-def _preflight(settings: Any) -> list[str]:
+async def _preflight(settings: Any, database: Any) -> list[str]:
     """Report configuration that would make a live run silently do nothing."""
 
     problems: list[str] = []
@@ -51,7 +51,17 @@ def _preflight(settings: Any) -> list[str]:
     if not settings.gitea_api_token:
         problems.append("PHI_GITEA_API_TOKEN is not set")
     if not settings.gitea_org:
-        problems.append("PHI_GITEA_ORG is not set (the Gitea adapter cannot list repositories without it)")
+        # An unset PHI_GITEA_ORG is only a problem when nothing else names an
+        # org to sync. ``build_gitea_adapters`` falls back to every distinct
+        # ``root_authentik_team_id`` on a boundary, which is the shape
+        # ``POST /admin/sync/discover-projects`` creates for a Gitea instance
+        # that hosts one org per project team.
+        boundaries = await database.list("boundaries")
+        if not any(getattr(boundary, "root_authentik_team_id", None) for boundary in boundaries):
+            problems.append(
+                "PHI_GITEA_ORG is not set and no boundary records an org to sync "
+                "(set PHI_GITEA_ORG, or run POST /admin/sync/discover-projects first)"
+            )
     if not settings.people_portal_url and not settings.authentik_url:
         problems.append("PHI_PEOPLE_PORTAL_URL or PHI_AUTHENTIK_URL is required for team sizes")
     if settings.sqlite_path == ":memory:":
@@ -61,16 +71,18 @@ def _preflight(settings: Any) -> list[str]:
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     settings = get_settings()
-    problems = _preflight(settings)
+    await init_db(settings)
+    database = get_active_repository()
+
+    problems = await _preflight(settings, database)
     if problems and not args.allow_incomplete:
+        await close_db()
         return {
             "status": "not_configured",
             "problems": problems,
             "hint": "fix the settings above, or pass --allow-incomplete to run anyway",
         }
 
-    await init_db(settings)
-    database = get_active_repository()
     try:
         if args.command == "backfill":
             result = await run_weekly_backfill(

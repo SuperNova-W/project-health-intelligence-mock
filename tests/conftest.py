@@ -9,6 +9,13 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timedelta, timezone
 
+# Settings reads a dotenv file by default (backend.config._ENV_FILE) so the
+# server can't boot with an empty environment. Tests must stay hermetic:
+# disable that file load outright, or a developer's real .env would hand the
+# suite a live Gitea URL, a Gitea token and an OpenAI key. Set before
+# backend.config is imported below -- _ENV_FILE is resolved at import time.
+os.environ["PHI_ENV_FILE"] = ""
+
 # The settings singleton is read at import time by several modules, so the
 # in-memory database path must be in the environment before anything else.
 os.environ.setdefault("PHI_SQLITE_PATH", ":memory:")

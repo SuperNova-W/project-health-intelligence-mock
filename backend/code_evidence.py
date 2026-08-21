@@ -97,6 +97,11 @@ class CommitFact:
     noise_files: list[str]
     is_noise_only: bool
     is_chore_like: bool
+    # True when the per-commit stat call failed, so additions/deletions/files
+    # are unknown rather than known-empty. Such a commit is kept out of the
+    # diff budget (is_noise_only), but callers must NOT read the resulting
+    # empty week as "nothing happened" -- see week_evidence's fetch_errors.
+    stat_unavailable: bool = False
 
     @property
     def real_files(self) -> list[str]:
@@ -349,6 +354,7 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
                 sha=sha, repo_slug=repo_slug, subject=subject, committed_at=committed_at,
                 additions=0, deletions=0, files=[], noise_files=[], is_noise_only=True,
                 is_chore_like=bool(_CHORE_MESSAGE_RE.match(subject)),
+                stat_unavailable=True,
             )
         stats = meta.get("stats") or {}
         files_meta = meta.get("files") or []
@@ -393,6 +399,11 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
                 fact = self._commit_fact(repo_slug, raw)
                 if fact is not None:
                     evidence.commits.append(fact)
+                    if fact.stat_unavailable:
+                        # Recorded, not swallowed: a stat outage otherwise
+                        # empties non_noise_commits and reads identically to
+                        # a genuinely quiet week.
+                        evidence.fetch_errors.append(f"{fact.sha}: commit metadata fetch failed")
             repos.append(evidence)
 
         all_non_noise = [commit for repo in repos for commit in repo.commits if not commit.is_noise_only]

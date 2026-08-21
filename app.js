@@ -40,6 +40,9 @@ const AGGREGATE_METRIC_KEYS = [
   'active_contributors',
 ];
 const viewLabels = { overview: 'Overview', projects: 'Projects', insights: 'Insights' };
+// The inventory filter chips, hoisted out of renderProjects so the router can
+// validate a `?filter=` value against the same list the UI offers.
+const PROJECT_FILTERS = ['All projects', 'Active projects', 'Needs attention', 'At risk', 'Watch', 'Clear', 'Insufficient data', 'Planned pause'];
 const statusMeta = {
   risk: { copy: 'Needs a conversation with the team.', cta: 'Review warning' },
   watch: { copy: 'Emerging signal, worth a look.', cta: 'Review warning' },
@@ -55,10 +58,20 @@ const state = {
   projects: [],
   projectSnapshots: {},
   projectSnapshotMeta: {},
+  // Point-in-time project profiles, keyed `${projectId}@${YYYY-MM-DD}`, kept
+  // apart from projectSnapshots above so a historical view never overwrites
+  // (or gets served from) the live cache. Each entry is
+  // { hasData: boolean, project: normalizedProject|null }.
+  projectAsOf: {},
   calendarDate: null,
+  delivery: null,
   calendarLoading: false,
   calendarError: null,
   calendarResult: null,
+  // The date calendarResult was actually fetched for. The router compares it
+  // against calendarDate so returning to a route via Back/Forward re-renders
+  // from cache instead of refetching a snapshot it already holds.
+  calendarLoadedDate: null,
   calendarComputing: new Set(),
   calendarComputeErrors: {},
   // Projects-page cumulative-progress-as-of-date calendar. Separate from
@@ -69,11 +82,26 @@ const state = {
   progressError: null,
   progressComputable: false,
   progressResult: {}, // project_id -> { state: 'pending'|'done'|'error', data?, error? }
+  // The date a *portfolio-wide* progress fan-out was last run for. Matters
+  // more than calendarLoadedDate above: re-running it costs one LLM request
+  // per project, so Back/Forward must never trigger it for a date already
+  // loaded. Deliberately left null by the single-project loader below, whose
+  // result covers only one row of the list.
+  progressLoadedDate: null,
   progressRunId: 0,
 };
 
 let currentView = 'overview';
 let selectedProjectId = null;
+// The date the open profile is being viewed "as of", captured at click time
+// from state.calendarDate rather than read live -- the portfolio calendar can
+// be cleared or re-pointed while the profile is open, and this view must keep
+// showing the week the user actually drilled into. null means live data.
+let selectedProjectAsOfDate = null;
+// Which project's cumulative-progress checkpoint the 'progress' view is
+// showing. Deliberately separate from selectedProjectId: that one drives the
+// weekly-snapshot profile, and the two views answer different questions.
+let selectedProgressProjectId = null;
 let currentFilter = 'All projects';
 let modalFeedback = '';
 let feedbackWarningId = null;
@@ -518,8 +546,15 @@ function formatPercent(value) {
   return number === null ? '—' : `${Math.round(number)}%`;
 }
 
+// Cache key for one project's snapshot metadata: the plain project id for the
+// live profile, id@date while that project is being viewed as of a past week.
+function profileCacheKey(projectId) {
+  return selectedProjectAsOfDate && projectId === selectedProjectId ? `${projectId}@${selectedProjectAsOfDate}` : projectId;
+}
+
 function snapshotMetaFor(project = null) {
-  const snapshot = project && state.projectSnapshotMeta[project.id] ? state.projectSnapshotMeta[project.id] : state.snapshot || {};
+  const cached = project ? state.projectSnapshotMeta[profileCacheKey(project.id)] : null;
+  const snapshot = cached || (project && selectedProjectAsOfDate && project.id === selectedProjectId ? {} : state.snapshot || {});
   return {
     snapshotId: firstDefined(project?.snapshotId, snapshot.snapshotId, null),
     snapshotWeekStart: snapshot.snapshotWeekStart,
@@ -675,18 +710,6 @@ function evidenceList(project, size = '') {
   return project.evidence.map((item) => evidenceRow(project, item, size)).join('');
 }
 
-function boundaryCard(project) {
-  const boundary = project.boundary;
-  if (!boundary) return `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project boundary</h2><p class="panel-subtitle">Canonical ownership record</p></div></div><div class="history-empty">No boundary record returned for this project.</div></section>`;
-  const effective = boundary.effectiveUntil ? `${boundary.effectiveSince} – ${boundary.effectiveUntil}` : boundary.effectiveSince;
-  return `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project boundary</h2><p class="panel-subtitle">Versioned ownership record</p></div><span class="eyebrow">${escapeHtml(boundary.lifecycle)}</span></div><dl class="boundary-list"><div><dt>Root team</dt><dd>${escapeHtml(boundary.rootTeam)}</dd></div><div><dt>Included subteams</dt><dd>${escapeHtml(boundary.subteams.length ? boundary.subteams.join(', ') : '—')}</dd></div><div><dt>Repositories</dt><dd>${escapeHtml(boundary.repos.length ? boundary.repos.join(', ') : '—')}</dd></div><div><dt>Data owner</dt><dd>${escapeHtml(boundary.dataOwner)}</dd></div><div><dt>Effective dates</dt><dd>${escapeHtml(effective)}</dd></div>${boundary.version ? `<div><dt>Boundary version</dt><dd>${escapeHtml(boundary.version)}</dd></div>` : ''}</dl></section>`;
-}
-
-function historyCard(project) {
-  const items = project.history || [];
-  return `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Review history</h2><p class="panel-subtitle">Recorded decisions for this project</p></div></div><div class="history-list">${items.length ? items.map((item) => `<div class="history-item"><div class="history-top"><span class="history-action">${escapeHtml(item.action)}</span><span class="history-date">${escapeHtml(formatDate(item.date, true))}</span></div>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div>`).join('') : '<div class="history-empty">No review notes recorded for this project.</div>'}</div></section>`;
-}
-
 function assessmentNumber(value, asPercent = false) {
   const number = finiteNumber(value);
   if (number === null) return '—';
@@ -708,10 +731,15 @@ function assessmentItems(items, emptyCopy) {
   return `<ul class="assessment-list">${items.map((item) => `<li><strong>${escapeHtml(item.title)}</strong>${item.week !== null && item.week !== undefined ? `<span class="assessment-week">Week ${escapeHtml(item.week)}</span>` : ''}${item.detail ? `<span>${escapeHtml(item.detail)}</span>` : ''}</li>`).join('')}</ul>`;
 }
 
+function weeklyProgressCard(project) {
+  const statusClass = ['risk', 'watch', 'clear'].includes(project.statusClass) ? project.statusClass : 'neutral';
+  return `<section class="panel ci-assessment"><div class="panel-header"><div><span class="eyebrow">This week's progress</span><h2 class="panel-title">${escapeHtml(project.signal)}</h2><p class="panel-subtitle">${escapeHtml(project.signalDetail)}</p></div><span class="assessment-badge ${statusClass}">${escapeHtml(project.status)}</span></div></section>`;
+}
+
 function healthAssessmentCard(project) {
   const assessment = project.healthAssessment;
   if (!assessment) {
-    return `<section class="panel ci-assessment ci-assessment-unavailable"><div class="panel-header"><div><span class="eyebrow">CI project health</span><h2 class="panel-title">Assessment not available</h2><p class="panel-subtitle">The CI agent has not returned an inspectable assessment for this project.</p></div><span class="assessment-badge neutral">Unavailable</span></div><div class="assessment-empty-body">Project health stays separate from the repository signals until the server provides status, evidence, or recommendations.</div></section>`;
+    return weeklyProgressCard(project);
   }
   const statusClass = ['risk', 'watch', 'clear'].includes(assessment.statusClass) ? assessment.statusClass : 'neutral';
   const statusLabel = assessment.status || 'Assessment returned';
@@ -720,15 +748,14 @@ function healthAssessmentCard(project) {
   return `<section class="panel ci-assessment"><div class="panel-header"><div><span class="eyebrow">CI project health</span><h2 class="panel-title">${escapeHtml(statusLabel)}</h2><p class="panel-subtitle">Server-provided assessment against the project specification and weekly plan.</p></div><span class="assessment-badge ${statusClass}">${escapeHtml(statusLabel)}</span></div>${metrics}${assessment.explanation ? `<div class="assessment-explanation">${escapeHtml(assessment.explanation)}</div>` : ''}<div class="assessment-columns"><div class="assessment-block"><h3>Blockers</h3>${assessmentItems(assessment.blockers, 'No blockers returned.')}</div><div class="assessment-block"><h3>Recommended weekly tasks</h3>${assessmentItems(assessment.weeklyTasks, 'No weekly tasks returned.')}</div></div>${citations}</section>`;
 }
 
-function overviewAssessmentSummary(projects) {
-  const assessed = projects.filter((project) => project.healthAssessment);
-  const attention = assessed.filter((project) => ['risk', 'watch'].includes(project.healthAssessment.statusClass));
-  return `<section class="panel ci-overview-summary"><div class="ci-summary-copy"><span class="eyebrow">CI project health</span><h2 class="panel-title">Early project-spec coverage</h2><p class="panel-subtitle">Coverage is counted only when the server returns an inspectable assessment.</p></div><div class="ci-summary-stats"><div><strong>${assessed.length}/${projects.length}</strong><span>projects assessed</span></div><div><strong>${attention.length}</strong><span>need attention</span></div></div><button class="panel-link ci-attention-link" data-dashboard-filter="Needs attention" type="button">Open attention table →</button></section>`;
-}
-
+// Overview's date picker is a jump-off, not a mode: choosing a date navigates
+// to the inventory page's as-of view. So it deliberately shows no current value
+// and no "Back to live" affordance -- Overview is never itself in an as-of
+// state, and echoing state.calendarDate here would surface a date left over
+// from a project profile's historical drill-down.
 function calendarControlMarkup() {
   const today = new Date().toISOString().slice(0, 10);
-  return `<div class="calendar-control"><label for="calendar-date-input">${icon('calendar')}<span>View portfolio as of</span></label><input type="date" id="calendar-date-input" max="${today}" value="${escapeHtml(state.calendarDate || '')}" />${state.calendarDate ? '<button class="text-button" id="calendar-clear">Back to live ×</button>' : ''}</div>`;
+  return `<div class="calendar-control"><label for="calendar-date-input">${icon('calendar')}<span>View portfolio as of</span></label><input type="date" id="calendar-date-input" max="${today}" value="" /></div>`;
 }
 
 function calendarPanelMarkup() {
@@ -765,28 +792,45 @@ function renderOverview() {
   const clear = projects.filter((project) => project.statusClass === 'clear');
   const insufficient = projects.filter((project) => project.statusClass === 'data');
   const active = projects.filter(isActiveProject);
-  const signalMetricAliases = {
-    openPRs: ['openPRs', 'open_prs', 'oldest_open_pr_days'],
-    activity: ['activity', 'active_days', 'days_since_activity'],
-    contributors: ['contributors', 'active_contributors'],
-  };
-  const signalCounts = ['openPRs', 'activity', 'contributors'].map((metric, index) => ({
-    metric,
-    count: projects.filter((project) => project.evidence.some((item) => signalMetricAliases[metric].includes(item.metric))).length,
-    icon: ['pull', 'activity', 'users'][index],
-    title: ['Pull request aging', 'Activity trend', 'Contributor resilience'][index],
-    copy: ['Review or decision bottlenecks', 'Below project baseline', 'Aggregate count only'][index],
-  }));
-  return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning</h1><p>Here’s the current read on the projects that matter this week.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div>${calendarControlMarkup()}</div></div>
-    ${calendarPanelMarkup()}
-    <div class="stat-grid"><button class="stat-card total dashboard-filter" data-dashboard-filter="Active projects" type="button"><span class="stat-label"><span>Active projects</span><span class="stat-icon">${icon('folder')}</span></span><span class="stat-value">${active.length}</span><span class="stat-foot">Current snapshot</span></button><button class="stat-card attention dashboard-filter" data-dashboard-filter="Needs attention" type="button"><span class="stat-label"><span>Need attention</span><span class="stat-icon">${icon('triangle')}</span></span><span class="stat-value">${attention.length}</span><span class="stat-foot">Warnings with evidence</span></button><button class="stat-card clear dashboard-filter" data-dashboard-filter="Clear" type="button"><span class="stat-label"><span>Clear</span><span class="stat-icon">${icon('check-circle')}</span></span><span class="stat-value">${clear.length}</span><span class="stat-foot">Explicit server status only</span></button><button class="stat-card data dashboard-filter" data-dashboard-filter="Insufficient data" type="button"><span class="stat-label"><span>Insufficient data</span><span class="stat-icon">${icon('database')}</span></span><span class="stat-value">${insufficient.length}</span><span class="stat-foot">Signals remain suppressed</span></button></div>
-    ${overviewAssessmentSummary(projects)}
-    <div class="insight-banner"><div class="insight-banner-icon">${icon(attention.length ? 'sparkle' : 'database')}</div><div class="insight-copy"><strong>${attention.length ? `${attention.length} projects may need leadership attention this week.` : 'No inspectable warnings are in the current queue.'}</strong><span>${attention.length ? 'Review the evidence, add context, and decide what to verify with each team.' : 'Insufficient data and planned pauses stay out of the attention queue.'}</span></div><button class="insight-link" id="banner-review">Review attention queue →</button></div>
-    <div class="dashboard-grid"><section class="panel queue-panel"><div class="panel-header"><div><h2 class="panel-title">Attention queue</h2><p class="panel-subtitle">Only server-issued warnings with evidence references appear here.</p></div><button class="panel-link" id="queue-filter">View all projects</button></div><div class="queue-list">${attention.length ? attention.map((project) => `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`).join('') : '<div class="history-empty" style="padding:20px;">No projects require attention from this snapshot.</div>'}</div></section><div><section class="panel pulse-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio pulse</h2><p class="panel-subtitle">Historical queue series is shown only when returned by the API.</p></div><span class="eyebrow">Snapshot</span></div><div class="pulse-chart"><div class="chart-empty" style="width:100%;height:128px;">Historical queue data unavailable</div></div><div class="pulse-footer"><div class="chart-legend"><span class="legend-line"></span> Evidence-backed status</div><span class="chart-note">No inferred history</span></div></section><section class="panel signal-panel"><div class="panel-header"><div><h2 class="panel-title">Signal mix</h2><p class="panel-subtitle">What is driving this week’s queue</p></div></div><div class="signal-list">${signalCounts.map((signal) => `<div class="signal-row"><span class="signal-icon ${signal.metric === 'openPRs' ? 'red' : signal.metric === 'activity' ? 'amber' : 'blue'}">${icon(signal.icon)}</span><div class="signal-copy"><strong>${signal.title}</strong><span>${signal.copy}</span></div><span class="signal-count">${signal.count}</span></div>`).join('')}</div></section></div></div>`;
+  return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning</h1></div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div>${calendarControlMarkup()}</div></div>
+    ${statGridMarkup(active, attention, clear, insufficient)}`;
+}
+
+// A stat card that is not a filter: the delivery figures describe the whole
+// portfolio and have no corresponding project filter to switch to, so they
+// render as plain tiles rather than buttons.
+function deliveryCardMarkup(accent, label, iconName, value, foot) {
+  const shown = value === null || value === undefined ? '—' : value;
+  return `<div class="stat-card ${accent}"><span class="stat-label"><span>${escapeHtml(label)}</span><span class="stat-icon">${icon(iconName)}</span></span><span class="stat-value">${escapeHtml(String(shown))}</span><span class="stat-foot">${escapeHtml(foot)}</span></div>`;
+}
+
+// Second row of the stat grid: what the portfolio has in flight, as opposed to
+// the status counts above. Contributor count is deliberately NOT shown: the
+// identity_map table is empty, so /portfolio/delivery can only count distinct
+// author strings -- display names and usernames for the same person both
+// count -- and a headline figure of 'people' built from that would be wrong. Everything here comes from the Gitea sync via
+// /portfolio/delivery; a null renders as "--" so "not synced yet" never
+// masquerades as a real zero.
+function deliveryGridMarkup() {
+  const d = state.delivery;
+  const oldest = d && typeof d.oldest_open_pr_days === 'number' ? `${Math.round(d.oldest_open_pr_days)}d` : null;
+  return [
+    deliveryCardMarkup('total', 'Open PRs', 'pull', d ? d.open_prs : null, 'Awaiting review or merge'),
+    deliveryCardMarkup('attention', 'Oldest open PR', 'calendar', oldest, 'Longest wait in the portfolio'),
+    deliveryCardMarkup('data', 'Branches ahead', 'activity', d ? d.branches_ahead : null, 'Work not yet on the default branch'),
+    deliveryCardMarkup('clear', 'Open issues', 'message', d ? d.open_issues : null, 'Tracked across all repositories'),
+  ].join('');
+}
+
+// The stat cards are Overview's whole body now that the per-project week-signal
+// list has moved to the inventory page, so they always render. They used to be
+// suppressed whenever that list was open.
+function statGridMarkup(active, attention, clear, insufficient) {
+  return `<div class="stat-grid"><button class="stat-card total dashboard-filter" data-dashboard-filter="Active projects" type="button"><span class="stat-label"><span>Active projects</span><span class="stat-icon">${icon('folder')}</span></span><span class="stat-value">${active.length}</span><span class="stat-foot">Current snapshot</span></button><button class="stat-card attention dashboard-filter" data-dashboard-filter="Needs attention" type="button"><span class="stat-label"><span>Need attention</span><span class="stat-icon">${icon('triangle')}</span></span><span class="stat-value">${attention.length}</span><span class="stat-foot">Warnings with evidence</span></button><button class="stat-card clear dashboard-filter" data-dashboard-filter="Clear" type="button"><span class="stat-label"><span>Clear</span><span class="stat-icon">${icon('check-circle')}</span></span><span class="stat-value">${clear.length}</span><span class="stat-foot">Explicit server status only</span></button><button class="stat-card data dashboard-filter" data-dashboard-filter="Insufficient data" type="button"><span class="stat-label"><span>Insufficient data</span><span class="stat-icon">${icon('database')}</span></span><span class="stat-value">${insufficient.length}</span><span class="stat-foot">Signals remain suppressed</span></button>${deliveryGridMarkup()}</div>`;
 }
 
 function renderProjects() {
-  const filters = ['All projects', 'Active projects', 'Needs attention', 'At risk', 'Watch', 'Clear', 'Insufficient data', 'Planned pause'];
+  const filters = PROJECT_FILTERS;
   const filtered = currentFilter === 'All projects'
     ? state.projects
     : currentFilter === 'Active projects'
@@ -794,7 +838,7 @@ function renderProjects() {
       : currentFilter === 'Needs attention'
         ? state.projects.filter(isAttentionProject)
         : state.projects.filter((project) => project.status === currentFilter);
-  return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1><p>Every project boundary, current attention status, and data freshness in one place.</p>${snapshotMetaMarkup()}</div><div class="heading-actions">${progressControlMarkup()}</div></div>
+  return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1></div><div class="heading-actions">${progressControlMarkup()}</div></div>
     ${progressPanelMarkup()}
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => `<tr class="project-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td><td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
 }
@@ -810,9 +854,31 @@ function renderInsights() {
   return `<div class="page-heading"><div><span class="eyebrow">Combined view · last 8 weeks</span><h1>Insights</h1><p>Aggregate activity, review flow, and contributor counts where the server aggregation floor permits.</p>${snapshotMetaMarkup()}</div></div><section class="panel"><div class="table-scroll"><table class="insights-table"><thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th>${contributorHeader}</tr></thead><tbody>${state.projects.length ? state.projects.map((project) => `<tr class="insights-row" data-project-id="${escapeHtml(project.id)}"><td>${insightsProjectCell(project)}</td><td>${chartCaption('', metricValue(project.metrics, 'active_days', lastValue(project.series.activity)), project.seriesBaselines.activity?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'open_prs', lastValue(project.series.openPRs)), project.seriesBaselines.openPRs?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'review_latency_days', lastValue(project.series.reviewLatency)), project.seriesBaselines.reviewLatency?.[0], 'd')}</td>${contributorCell(project)}</tr>`).join('') : `<tr><td colspan="${showContributorColumn ? 5 : 4}"><div class="history-empty">No project metrics returned.</div></td></tr>`}</tbody></table></div></section>`;
 }
 
+// Banner shown on a profile opened from the portfolio-as-of-date calendar, so
+// a historical week can never be mistaken for live data. Reuses the date-chip
+// and "Back to live ×" affordances the calendar controls already use.
+function asOfBannerMarkup() {
+  if (!selectedProjectAsOfDate) return '';
+  return `<div class="as-of-banner"><div class="date-chip">${icon('calendar')} As of ${escapeHtml(formatDate(selectedProjectAsOfDate))}</div><span>Historical snapshot · the verdict as it was judged that week, not today's signals.</span><button class="text-button" id="profile-live">Back to live ×</button></div>`;
+}
+
+function profileBackLinkMarkup() {
+  const label = selectedProjectAsOfDate ? `Back to portfolio as of ${formatDate(selectedProjectAsOfDate)}` : 'Back to inventory';
+  return `<button class="text-button back-link" id="profile-back"><span>←</span> ${escapeHtml(label)}</button>`;
+}
+
+// A project can have no persisted snapshot for the selected week. Say so
+// plainly -- falling back to the live profile here would silently reintroduce
+// exactly the present-data-under-a-past-date confusion this view fixes.
+function renderAsOfEmptyProfile() {
+  const listed = state.projects.find((project) => project.id === selectedProjectId);
+  const name = listed ? listed.name : 'This project';
+  return `<div class="page-heading"><div>${profileBackLinkMarkup()}<div class="profile-title-row">${listed ? monogram({ ...listed, statusClass: '' }, 'lg') : ''}<div><h1>${escapeHtml(name)}</h1><p>${escapeHtml(listed ? `${listed.team} · ${listed.repo}` : 'No snapshot for this week')}</p></div></div></div></div>${asOfBannerMarkup()}<section class="panel"><div class="empty-view"><div class="empty-view-inner"><div class="empty-view-icon">${icon('database')}</div><h2>No snapshot for this week</h2><p>No snapshot was computed for ${escapeHtml(name)} for the week of ${escapeHtml(formatDate(selectedProjectAsOfDate))}, so there is nothing to show as of that date. Return to live to see the current profile.</p></div></div></section>`;
+}
+
 function renderProjectProfile(project) {
   const meta = statusMeta[project.statusClass] || statusMeta.data;
-  return `<div class="page-heading"><div><button class="text-button back-link" id="profile-back"><span>←</span> Back to inventory</button><div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p>${snapshotMetaMarkup(project, true)}</div>${statusPill(project)}</div></div></div><div class="detail-status wide ${escapeHtml(project.statusClass)}"><strong>${escapeHtml(project.status)}</strong><span>${escapeHtml(meta.copy)}</span></div>${healthAssessmentCard(project)}${metricCharts(project)}${aggregateMetricsSection(project)}<div class="profile-grid"><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Warnings require inspectable source evidence.</p></div><span class="eyebrow">${escapeHtml(formatPercent(project.dataCompletenessPct))} complete</span></div><div class="evidence-section wide">${evidenceList(project, 'lg')}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${escapeHtml(meta.cta)} <span>→</span></button></div></section><div class="profile-side">${boundaryCard(project)}${historyCard(project)}</div></div>`;
+  return `<div class="page-heading"><div>${profileBackLinkMarkup()}<div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p>${snapshotMetaMarkup(project, true)}</div>${statusPill(project)}</div></div></div>${asOfBannerMarkup()}<div class="detail-status wide ${escapeHtml(project.statusClass)}"><strong>${escapeHtml(project.status)}</strong><span>${escapeHtml(meta.copy)}</span></div>${healthAssessmentCard(project)}${metricCharts(project)}${aggregateMetricsSection(project)}<div class="profile-grid"><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Evidence</h2><p class="panel-subtitle">Warnings require inspectable source evidence.</p></div><span class="eyebrow">${escapeHtml(formatPercent(project.dataCompletenessPct))} complete</span></div><div class="evidence-section wide">${evidenceList(project, 'lg')}</div><div class="detail-actions"><button class="secondary-button" id="add-context">Add context</button><button class="primary-button" id="confirm-review">${escapeHtml(meta.cta)} <span>→</span></button></div></section></div>`;
 }
 
 function loadingPanel(message) {
@@ -838,12 +904,22 @@ function render() {
   else if (currentView === 'overview') appView.innerHTML = renderOverview();
   else if (currentView === 'projects') appView.innerHTML = renderProjects();
   else if (currentView === 'insights') appView.innerHTML = renderInsights();
+  else if (currentView === 'progress') appView.innerHTML = renderProgressDetail();
   else if (currentView === 'profile') {
     const project = selectedProject();
-    appView.innerHTML = !project ? errorPanel('This project is outside the current access scope.') : state.profileLoading ? loadingPanel('Loading project snapshots…') : state.profileError ? errorPanel(state.profileError, 'retry-profile') : renderProjectProfile(project);
+    const asOfEntry = selectedProjectAsOfDate ? state.projectAsOf[`${selectedProjectId}@${selectedProjectAsOfDate}`] : null;
+    appView.innerHTML = state.profileLoading
+      ? loadingPanel(selectedProjectAsOfDate ? `Loading the snapshot as of ${formatDate(selectedProjectAsOfDate)}…` : 'Loading project snapshots…')
+      : state.profileError ? errorPanel(state.profileError, 'retry-profile')
+        : asOfEntry && !asOfEntry.hasData ? renderAsOfEmptyProfile()
+          : !project ? errorPanel('This project is outside the current access scope.')
+            : renderProjectProfile(project);
   }
-  document.getElementById('breadcrumb-current').textContent = currentView === 'profile' ? (selectedProject()?.name || 'Project') : viewLabels[currentView];
-  const navActiveView = currentView === 'profile' ? 'projects' : currentView;
+  // Lets CSS target a single view without inspecting its contents. Overview
+  // uses it to fill the viewport and centre its stat row vertically, which
+  // must not happen on the content-driven views.
+  appView.dataset.view = (state.loading || state.error) ? 'loading' : currentView;
+  const navActiveView = (currentView === 'profile' || currentView === 'progress') ? 'projects' : currentView;
   document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.view === navActiveView));
   updateChrome();
   bindViewEvents();
@@ -851,6 +927,9 @@ function render() {
 }
 
 function selectedProject() {
+  // A profile opened as of a past date resolves only from the point-in-time
+  // cache; it must never fall back to the live snapshot or the live list.
+  if (selectedProjectAsOfDate) return state.projectAsOf[`${selectedProjectId}@${selectedProjectAsOfDate}`]?.project || null;
   return state.projectSnapshots[selectedProjectId] || state.projects.find((project) => project.id === selectedProjectId) || null;
 }
 
@@ -886,6 +965,18 @@ async function loadLatestSnapshot() {
   }
 }
 
+// Portfolio-wide delivery facts for the Overview stat row. Cache-only on the
+// server, so it is cheap and never blocks the page: a failure leaves the extra
+// cards showing "--" rather than surfacing an error over the status counts.
+async function loadPortfolioDelivery() {
+  try {
+    state.delivery = await requestJson('/portfolio/delivery');
+  } catch {
+    state.delivery = null;
+  }
+  render();
+}
+
 async function loadCalendarSnapshot(dateStr) {
   state.calendarDate = dateStr;
   state.calendarLoading = true;
@@ -899,10 +990,12 @@ async function loadCalendarSnapshot(dateStr) {
     state.calendarResult.hasData = Boolean(raw?.has_data);
     state.calendarResult.missingProjectIds = asArray(raw?.missing_project_ids);
     state.calendarResult.computable = Boolean(raw?.computable);
+    state.calendarLoadedDate = dateStr;
     state.calendarLoading = false;
     render();
   } catch (error) {
     state.calendarLoading = false;
+    state.calendarLoadedDate = null; // leave it refetchable when the route is revisited
     state.calendarError = error;
     render();
   }
@@ -926,13 +1019,11 @@ async function computeCalendarProjectSnapshot(projectId) {
   }
 }
 
+// Clearing the portfolio calendar *is* a navigation -- #/overview?asOf=... to
+// plain #/overview -- so it goes through the router rather than mutating state
+// directly, which is what keeps the URL and the screen from drifting apart.
 function clearCalendarSnapshot() {
-  state.calendarDate = null;
-  state.calendarResult = null;
-  state.calendarError = null;
-  state.calendarComputing = new Set();
-  state.calendarComputeErrors = {};
-  render();
+  goto({ view: 'overview', asOf: null });
 }
 
 // ---------------------------------------------------------------------
@@ -957,6 +1048,7 @@ async function loadProgressAt(dateStr) {
   } catch (error) {
     if (runId !== state.progressRunId) return;
     state.progressLoading = false;
+    state.progressLoadedDate = null; // leave it refetchable when the route is revisited
     state.progressError = error;
     render();
     return;
@@ -971,6 +1063,7 @@ async function loadProgressAt(dateStr) {
   missing.forEach((id) => { results[id] = { state: 'pending' }; });
   state.progressResult = results;
   state.progressLoading = false;
+  state.progressLoadedDate = dateStr;
   state.progressComputable = Boolean(raw?.computable);
   render();
 
@@ -997,6 +1090,41 @@ async function computeProjectProgress(projectId, dateStr, runId) {
   }
 }
 
+// Cold-load path for #/projects/:id/progress?asOf=... -- a deep link, a
+// refresh, or Back onto a detail view whose checkpoint is no longer in memory.
+// It reads the same cache-only GET the list view does, but computes at most
+// the ONE project the URL names; running the portfolio fan-out here would
+// spend an LLM request per project to render a single-project screen.
+async function loadProgressForProject(projectId, dateStr) {
+  const runId = ++state.progressRunId;
+  state.progressDate = dateStr;
+  state.progressResult = { [projectId]: { state: 'pending' } };
+  state.progressLoading = false;
+  state.progressError = null;
+  render();
+
+  let raw;
+  try {
+    raw = await requestJson(`/progress/at?date=${encodeURIComponent(dateStr)}`);
+  } catch (error) {
+    if (runId !== state.progressRunId) return;
+    state.progressResult[projectId] = { state: 'error', error };
+    render();
+    return;
+  }
+  if (runId !== state.progressRunId) return;
+
+  state.progressComputable = Boolean(raw?.computable);
+  const missing = new Set(asArray(raw?.missing_project_ids));
+  const cached = asArray(raw?.projects).find((project) => project.id === projectId);
+  if (cached && !missing.has(projectId)) {
+    state.progressResult[projectId] = { state: 'done', data: cached };
+    render();
+    return;
+  }
+  await computeProjectProgress(projectId, dateStr, runId);
+}
+
 function retryProjectProgress(projectId) {
   if (!state.progressDate) return;
   const runId = state.progressRunId;
@@ -1005,12 +1133,10 @@ function retryProjectProgress(projectId) {
   computeProjectProgress(projectId, state.progressDate, runId);
 }
 
+// Like clearCalendarSnapshot: a route change (#/projects?asOf=... -> #/projects),
+// so the router owns it and the in-flight fan-out is orphaned by setProgressDate.
 function clearProgress() {
-  state.progressRunId += 1; // orphan any in-flight fan-out requests
-  state.progressDate = null;
-  state.progressResult = {};
-  state.progressError = null;
-  render();
+  goto({ view: 'projects', filter: currentFilter, asOf: null });
 }
 
 function progressControlMarkup() {
@@ -1018,7 +1144,9 @@ function progressControlMarkup() {
   return `<div class="calendar-control"><label for="progress-date-input">${icon('calendar')}<span>View progress as of</span></label><input type="date" id="progress-date-input" max="${today}" value="${escapeHtml(state.progressDate || '')}" />${state.progressDate ? '<button class="text-button" id="progress-clear">Back to live ×</button>' : ''}</div>`;
 }
 
-const TRAJECTORY_LABELS = { accelerating: 'Accelerating', steady: 'Steady', slowing: 'Slowing', stalled: 'Stalled', unknown: '' };
+// 'stalled' is retired; kept here only so a checkpoint persisted before the
+// change still renders a label rather than a blank chip.
+const TRAJECTORY_LABELS = { accelerating: 'Accelerating', steady: 'Steady', slowing: 'Slowing', stalled: 'Slowing', unknown: '' };
 
 function progressRowMarkup(projectId) {
   const entry = state.progressResult[projectId];
@@ -1030,9 +1158,12 @@ function progressRowMarkup(projectId) {
     return `<div class="queue-item">${monogram(meta)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(meta.name)}</span></div><div class="queue-meta">${escapeHtml(meta.team)} · ${escapeHtml(meta.repo)}</div></div><button class="queue-action progress-retry" data-project-id="${escapeHtml(projectId)}">Could not compute — Retry</button></div>`;
   }
   const project = entry.data || {};
-  const trajectoryLabel = TRAJECTORY_LABELS[project.trajectory] || '';
   const fidelity = project.weeksTotal ? `${project.weeksDeepJudged} of ${project.weeksTotal} weeks reviewed in depth` : '';
-  return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span><span class="status-pill status-${escapeHtml(project.statusClass)}">${escapeHtml(project.status)}</span>${trajectoryLabel ? `<span class="trajectory-chip trajectory-${escapeHtml(project.trajectory)}">${escapeHtml(trajectoryLabel)}</span>` : ''}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.headline || '')}</strong>${fidelity ? `<span class="mono">${escapeHtml(fidelity)}</span>` : ''}</div></div>`;
+  // One signal per row: the attention status pill alone. Trajectory used to ride
+  // beside it as a second chip, which read as two competing verdicts on the same
+  // project; it now shows only in the checkpoint detail, where it is labelled and
+  // sits beside Work to date and Confidence.
+  return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span><span class="status-pill status-${escapeHtml(project.statusClass)}">${escapeHtml(project.status)}</span></div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.headline || '')}</strong>${fidelity ? `<span class="mono">${escapeHtml(fidelity)}</span>` : ''}</div><button class="queue-action view-progress" data-project-id="${escapeHtml(projectId)}">View progress</button></div>`;
 }
 
 function progressPanelMarkup() {
@@ -1044,6 +1175,117 @@ function progressPanelMarkup() {
     ? 'Cumulative standing as of this date, built from evidence available up to it -- computed automatically for every project.'
     : 'LLM signal is not configured, so progress cannot be computed.';
   return `<section class="panel calendar-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio progress as of ${escapeHtml(formatDate(state.progressDate))}</h2><p class="panel-subtitle">${escapeHtml(subtitle)}</p></div></div><div class="queue-list">${ids.length ? ids.map(progressRowMarkup).join('') : '<div class="history-empty" style="padding:20px;">No projects to show.</div>'}</div></section>`;
+}
+
+// ---------------------------------------------------------------------
+// Cumulative-checkpoint detail view (the drill-down from a progress row).
+//
+// Deliberately NOT the weekly-snapshot profile: a checkpoint answers
+// "where does this project stand, cumulatively, as of this date", so it
+// renders the checkpoint's own fields (trajectory, work to date,
+// milestones, open concerns) and never a single week's metrics/series.
+// Needs no fetch -- GET /progress/at and POST /projects/{id}/progress/at
+// already return the whole checkpoint, which the row cached in
+// state.progressResult.
+// ---------------------------------------------------------------------
+
+const WORK_LEVEL_LABELS = { none: 'None', trivial: 'Trivial', minimal: 'Minimal', moderate: 'Moderate', substantial: 'Substantial' };
+const SEVERITY_LABELS = { info: 'Info', warning: 'Warning', critical: 'Critical' };
+
+function openProgressDetail(projectId) {
+  goto({ view: 'progress', projectId, asOf: state.progressDate });
+}
+
+function progressBackLinkMarkup() {
+  const label = state.progressDate ? `Back to portfolio progress as of ${formatDate(state.progressDate)}` : 'Back to inventory';
+  return `<button class="text-button back-link" id="progress-back"><span>←</span> ${escapeHtml(label)}</button>`;
+}
+
+function progressBannerMarkup() {
+  return `<div class="as-of-banner"><div class="date-chip">${icon('calendar')} Cumulative standing as of ${escapeHtml(formatDate(state.progressDate))}</div><span>Cumulative-to-date synthesis · everything known about this project up to this date, not a single week's snapshot.</span></div>`;
+}
+
+function checkpointRefs(refs) {
+  const list = asArray(refs).filter((ref) => typeof ref === 'string' && ref.trim());
+  if (!list.length) return '';
+  return `<ul class="checkpoint-refs">${list.map((ref) => `<li>${escapeHtml(ref)}</li>`).join('')}</ul>`;
+}
+
+function checkpointItems(items, emptyCopy) {
+  const list = asArray(items);
+  if (!list.length) return `<p class="assessment-empty">${escapeHtml(emptyCopy)}</p>`;
+  return `<ul class="assessment-list">${list.map((item) => {
+    const severity = typeof item?.severity === 'string' ? item.severity : null;
+    const chip = severity ? `<span class="severity-chip severity-${escapeHtml(severity)}">${escapeHtml(SEVERITY_LABELS[severity] || severity)}</span>` : '';
+    return `<li><strong>${escapeHtml(item?.text || '')}</strong>${chip}${checkpointRefs(item?.evidence)}</li>`;
+  }).join('')}</ul>`;
+}
+
+function checkpointNotes(items, emptyCopy) {
+  const list = asArray(items).filter((item) => typeof item === 'string' && item.trim());
+  if (!list.length) return `<p class="assessment-empty">${escapeHtml(emptyCopy)}</p>`;
+  return `<ul class="assessment-list">${list.map((item) => `<li><strong>${escapeHtml(item)}</strong></li>`).join('')}</ul>`;
+}
+
+function progressDetailShell(name, body) {
+  return `<div class="page-heading"><div>${progressBackLinkMarkup()}<div class="profile-title-row"><div><h1>${escapeHtml(name)}</h1><p>Cumulative progress</p></div></div></div></div>${progressBannerMarkup()}<section class="panel">${body}</section>`;
+}
+
+function renderProgressEmptyDetail(name, reason) {
+  return progressDetailShell(name, `<div class="empty-view"><div class="empty-view-inner"><div class="empty-view-icon">${icon('database')}</div><h2>No cumulative progress to show</h2><p>${escapeHtml(reason)}</p></div></div>`);
+}
+
+function renderProgressDetail() {
+  const projectId = selectedProgressProjectId;
+  const entry = projectId ? state.progressResult[projectId] : null;
+  const listed = state.projects.find((project) => project.id === projectId);
+  const fallbackName = listed ? listed.name : (projectId || 'This project');
+  // Reached on a deep link or a refresh: the checkpoint isn't in memory yet
+  // and loadProgressForProject is fetching (or computing) it. state.progressLoading
+  // covers the frame between the route being applied and that fetch starting.
+  if (state.progressLoading || (entry && entry.state === 'pending')) {
+    return progressDetailShell(fallbackName, loadingPanel(`Loading cumulative progress as of ${formatDate(state.progressDate)}…`));
+  }
+  if (entry && entry.state === 'error') {
+    return progressDetailShell(fallbackName, errorPanel(entry.error?.message || 'This project’s progress could not be loaded.', 'retry-progress-detail'));
+  }
+  if (!entry || entry.state !== 'done' || !entry.data) {
+    return renderProgressEmptyDetail(fallbackName, 'This project’s progress is no longer loaded for the selected date. Return to the portfolio progress list and pick the date again.');
+  }
+  const project = entry.data;
+  // A checkpoint the server had nothing to build from: say so rather than
+  // dressing an empty synthesis up as a verdict.
+  if (!project.checkpointId) {
+    return renderProgressEmptyDetail(project.name || fallbackName, `No cumulative-progress checkpoint has been computed for ${project.name || fallbackName} as of ${formatDate(state.progressDate)}.`);
+  }
+
+  const trajectoryLabel = TRAJECTORY_LABELS[project.trajectory] || 'Unknown';
+  const workLabel = WORK_LEVEL_LABELS[project.workToDate] || '—';
+  const confidence = finiteNumber(project.confidence);
+  const fidelityBits = [];
+  if (project.weeksTotal) {
+    const shallow = project.weeksTotal - project.weeksDeepJudged;
+    fidelityBits.push(`${project.weeksDeepJudged} of ${project.weeksTotal} weeks reviewed in depth${shallow > 0 ? `; the other ${shallow} counted from commit metadata only` : ''}`);
+  }
+  if (project.historyTruncated) fidelityBits.push('history was truncated, so older activity may be missing');
+  if (project.isProvisional) fidelityBits.push('provisional — this date falls in the current, in-progress week');
+  if (project.generatedAt) fidelityBits.push(`synthesized ${formatDate(project.generatedAt, true)}`);
+  const fidelity = fidelityBits.length ? `<p class="assessment-empty-body">${escapeHtml(fidelityBits.join(' · '))}</p>` : '';
+
+  const header = `<div class="page-heading"><div>${progressBackLinkMarkup()}<div class="profile-title-row">${monogram(project, 'lg')}<div><h1>${escapeHtml(project.name)}</h1><p>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</p></div>${statusPill(project)}</div></div></div>`;
+  // Everything here was previously said two or three times over: the status as
+  // both the header pill and a full-width standing band, the trajectory as both
+  // a header chip and a metric cell, and "as of <date>, cumulative not weekly"
+  // in the back link, the banner AND the panel subtitle. Each now appears once,
+  // in whichever spot carries it best — nothing was dropped from the page.
+  // The narrative stands alone, directly under the as-of banner: it is the one
+  // thing a reader wants first, so it gets its own tile rather than being
+  // buried mid-panel between the metrics row and the milestone columns.
+  const summaryTile = project.narrative
+    ? `<section class="panel progress-summary"><span class="eyebrow">Summary</span><p>${escapeHtml(project.narrative)}</p></section>`
+    : '';
+  const summary = `<section class="panel ci-assessment"><div class="panel-header"><div><span class="eyebrow">Cumulative progress</span><h2 class="panel-title">${escapeHtml(project.headline || 'Cumulative progress')}</h2></div></div><div class="assessment-metrics"><div><span>Trajectory</span><strong class="trajectory-value trajectory-${escapeHtml(project.trajectory || 'unknown')}">${escapeHtml(trajectoryLabel)}</strong></div><div><span>Work to date</span><strong>${escapeHtml(workLabel)}</strong></div><div><span>Confidence</span><strong>${confidence === null ? '—' : `${Math.round(confidence * 100)}%`}</strong></div></div><div class="assessment-columns"><div class="assessment-block"><h3>Milestones to date</h3>${checkpointItems(project.milestones, 'No grounded milestones were recorded up to this date.')}</div><div class="assessment-block"><h3>Open concerns</h3>${checkpointItems(project.openConcerns, 'No open concerns were recorded up to this date.')}</div></div><div class="assessment-columns"><div class="assessment-block"><h3>Recommendations</h3>${checkpointNotes(project.recommendations, 'No recommendations were returned.')}</div><div class="assessment-block"><h3>Data gaps</h3>${checkpointNotes(project.dataGaps, 'No data gaps were reported.')}</div></div>${fidelity}</section>`;
+  return `${header}${progressBannerMarkup()}${summaryTile}${summary}`;
 }
 
 function projectFromSnapshotResponse(raw, projectId) {
@@ -1097,9 +1339,292 @@ async function loadProjectSnapshots(projectId) {
   }
 }
 
-function navigate(view) {
-  currentView = view;
+// Point-in-time sibling of loadProjectSnapshots. The cache-only endpoint
+// serves the same _project_response shape the live endpoint does, so the same
+// normalizeProject/renderProjectProfile path renders it unchanged.
+async function loadProjectSnapshotAsOf(projectId, dateStr) {
+  state.profileLoading = true;
+  state.profileError = null;
   render();
+  const key = `${projectId}@${dateStr}`;
+  try {
+    const raw = await requestJson(`/projects/${encodeURIComponent(projectId)}/snapshots/at?date=${encodeURIComponent(dateStr)}`);
+    const meta = snapshotMetaFromResponse(raw);
+    state.projectSnapshotMeta[key] = meta;
+    // Deliberately no merge with the live project record: filling gaps from
+    // today's data is what made the historical view misleading before.
+    state.projectAsOf[key] = raw?.has_data
+      ? { hasData: true, project: normalizeProject(raw.project, meta) }
+      : { hasData: false, project: null };
+    state.profileLoading = false;
+    render();
+  } catch (error) {
+    state.profileLoading = false;
+    state.profileError = error.message || `The snapshot as of ${formatDate(dateStr)} could not be loaded.`;
+    render();
+  }
+}
+
+// Opens a profile, live or as of a captured date, from wherever it was clicked.
+function openProject(projectId, asOfDate = null) {
+  goto({ view: 'profile', projectId, asOf: asOfDate });
+}
+
+function reloadProfile() {
+  if (!selectedProjectId) return;
+  if (selectedProjectAsOfDate) return loadProjectSnapshotAsOf(selectedProjectId, selectedProjectAsOfDate);
+  return loadProjectSnapshots(selectedProjectId);
+}
+
+// =====================================================================
+// Router
+//
+// Route table (hash routes, see buildHash/parseRoute below):
+//
+//   #/overview                                  overview, live portfolio
+//   #/overview?asOf=YYYY-MM-DD                  overview, portfolio-as-of calendar open
+//   #/insights                                  insights
+//   #/projects                                  project inventory
+//   #/projects?filter=At%20risk                 inventory, filter chip applied
+//   #/projects?asOf=YYYY-MM-DD                  inventory, cumulative-progress calendar open
+//   #/projects/:projectId                       project profile, live
+//   #/projects/:projectId?asOf=YYYY-MM-DD       project profile, historical week
+//   #/projects/:projectId/progress?asOf=DATE    cumulative-progress detail
+//
+// HASH routes, not pushState paths: the frontend is served by
+// `python -m http.server` locally and as plain static files on Vercel, and
+// neither rewrites unknown paths to index.html -- a path route would hard-404
+// on refresh and on every deep link. history.pushState is still used to
+// *write* the hash-bearing URL so Back/Forward get real history entries.
+//
+// A route object is the single source of truth for what is on screen:
+//   { view, projectId, asOf, filter }
+// applyRouteState() derives every module-level variable from it, which is what
+// makes Back restore not just the view but the project, date and filter too.
+// =====================================================================
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function withQuery(path, query) {
+  // URLSearchParams encodes spaces as '+', which round-trips fine but reads
+  // badly in a shared link; %20 is friendlier and parses identically.
+  const search = query.toString().replace(/\+/g, '%20');
+  return search ? `${path}?${search}` : path;
+}
+
+function buildHash(route) {
+  const query = new URLSearchParams();
+  if (route.asOf) query.set('asOf', route.asOf);
+  if (route.view === 'insights') return '#/insights';
+  if (route.view === 'projects') {
+    // 'All projects' is the default, so it stays out of the URL.
+    if (route.filter && route.filter !== 'All projects') query.set('filter', route.filter);
+    return withQuery('#/projects', query);
+  }
+  if (route.view === 'profile' && route.projectId) return withQuery(`#/projects/${encodeURIComponent(route.projectId)}`, query);
+  if (route.view === 'progress' && route.projectId) return withQuery(`#/projects/${encodeURIComponent(route.projectId)}/progress`, query);
+  // Overview, and the fallback for any half-built route (e.g. a profile with
+  // no project id) that has no addressable form of its own. Overview carries no
+  // query of its own now that its as-of date redirects to the inventory.
+  return '#/overview';
+}
+
+// Bookmarks predating the path-style routes used `#view=X&project=Y`. Map them
+// onto the equivalent new route; parseRoute's caller replaces the URL with the
+// modern form on arrival, so an old link upgrades itself on first use.
+function legacyRoute(hash) {
+  const params = new URLSearchParams(hash);
+  const view = params.get('view');
+  const projectId = params.get('project');
+  if (projectId && (view === 'profile' || !viewLabels[view])) return { view: 'profile', projectId };
+  if (viewLabels[view]) return { view };
+  return null;
+}
+
+// Returns a route object, or null for anything unrecognized (the caller falls
+// back to overview rather than rendering a blank view).
+function parseRoute(rawHash) {
+  const hash = String(rawHash || '').replace(/^#/, '');
+  if (!hash || hash === '/') return { view: 'overview' };
+  if (!hash.startsWith('/')) return legacyRoute(hash);
+
+  const [pathPart, queryPart] = hash.split('?');
+  const query = new URLSearchParams(queryPart || '');
+  const rawAsOf = query.get('asOf');
+  // A malformed date is dropped rather than honoured: every consumer of it
+  // feeds it straight into an API query string.
+  const asOf = rawAsOf && ISO_DATE_PATTERN.test(rawAsOf) ? rawAsOf : null;
+  let segments;
+  try {
+    segments = pathPart.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return null; // malformed percent-encoding
+  }
+
+  // Overview no longer renders a per-project week-signal list, so it has no
+  // dated form: an as-of date is a request to see the portfolio at a date,
+  // which now lives entirely on the inventory page. Old #/overview?asOf links
+  // land there instead of on a page that would ignore their date.
+  if (segments.length === 1 && segments[0] === 'overview') {
+    return asOf ? { view: 'projects', filter: 'All projects', asOf } : { view: 'overview' };
+  }
+  if (segments.length === 1 && segments[0] === 'insights') return { view: 'insights' };
+  if (segments[0] !== 'projects') return null;
+  if (segments.length === 1) {
+    const filter = query.get('filter');
+    return { view: 'projects', filter: PROJECT_FILTERS.includes(filter) ? filter : 'All projects', asOf };
+  }
+  if (segments.length === 2) return { view: 'profile', projectId: segments[1], asOf };
+  if (segments.length === 3 && segments[2] === 'progress') {
+    // A cumulative checkpoint only exists relative to a date, so a progress
+    // link without a usable one isn't addressable -- send it to the inventory,
+    // where the date can be picked, rather than to an undated empty view.
+    return asOf ? { view: 'progress', projectId: segments[1], asOf } : { view: 'projects' };
+  }
+  return null;
+}
+
+// The inverse of applyRouteState: what the current module state says the URL
+// should be. buildHash reads from here rather than from the route object passed
+// to goto(), so the URL reflects what was actually applied (normalized filter,
+// dropped as-of date, and so on).
+function routeFromState() {
+  if (currentView === 'profile') return { view: 'profile', projectId: selectedProjectId, asOf: selectedProjectAsOfDate };
+  if (currentView === 'progress') return { view: 'progress', projectId: selectedProgressProjectId, asOf: state.progressDate };
+  if (currentView === 'projects') return { view: 'projects', filter: currentFilter, asOf: state.progressDate };
+  if (currentView === 'overview') return { view: 'overview' };
+  return { view: currentView };
+}
+
+// Repointing either calendar invalidates its cached result. Both setters are
+// no-ops when the date is unchanged, which is what lets Back/Forward land on a
+// date-bearing route without discarding data already loaded for it.
+function setCalendarDate(dateStr) {
+  if (state.calendarDate === dateStr) return;
+  state.calendarDate = dateStr;
+  state.calendarResult = null;
+  state.calendarLoadedDate = null;
+  state.calendarError = null;
+  state.calendarComputing = new Set();
+  state.calendarComputeErrors = {};
+  // Marked loading up front so the render that follows shows a spinner rather
+  // than one frame of an empty panel before the fetch below starts.
+  state.calendarLoading = Boolean(dateStr);
+}
+
+function setProgressDate(dateStr) {
+  if (state.progressDate === dateStr) return;
+  state.progressRunId += 1; // orphan any in-flight fan-out requests
+  state.progressDate = dateStr;
+  state.progressResult = {};
+  state.progressLoadedDate = null;
+  state.progressError = null;
+  state.progressLoading = Boolean(dateStr);
+}
+
+function applyRouteState(route) {
+  currentView = route.view;
+  // On an inventory route the URL is authoritative: no `?filter=` means the
+  // default, so a link to plain #/projects can't inherit a filter left over
+  // from wherever the user was before. Other views carry the current filter
+  // through untouched so it survives a round trip to a profile and back.
+  if (route.view === 'projects') currentFilter = route.filter || 'All projects';
+  else if (route.filter) currentFilter = route.filter;
+  if (route.view === 'profile') selectedProjectId = route.projectId;
+  // Leaving the profile ends the as-of drill-down; the next profile opened is
+  // live unless it too is opened from a historical row.
+  selectedProjectAsOfDate = route.view === 'profile' ? (route.asOf || null) : null;
+  selectedProgressProjectId = route.view === 'progress' ? route.projectId : null;
+
+  if (route.view === 'overview') setCalendarDate(route.asOf || null);
+  // A profile opened as of a date came from the portfolio calendar -- or from
+  // a deep link that means the same thing -- so point the calendar at that
+  // week. Without this, a cold-loaded historical profile's "Back to portfolio
+  // as of ..." link would land on the live overview instead.
+  else if (route.view === 'profile' && route.asOf) setCalendarDate(route.asOf);
+  // The other views leave the portfolio calendar alone: they are drill-downs,
+  // and their back links rely on the date the user came from still being set.
+
+  if (route.view === 'projects' || route.view === 'progress') setProgressDate(route.asOf || null);
+
+  if (route.view === 'profile') {
+    state.profileLoading = true;
+    state.profileError = null;
+  }
+}
+
+// Fires whatever fetches the route needs. Safe to call for a route whose data
+// is already in memory -- each branch checks first -- which is what keeps
+// Back/Forward from re-requesting (and, for progress, re-computing) snapshots
+// the app already holds.
+function startRouteLoads(route) {
+  // Nothing can resolve before the portfolio snapshot lands; the bootstrap at
+  // the bottom of this file re-runs this once it has.
+  if (state.loading || state.error) return;
+  if (route.view === 'profile') {
+    if (selectedProjectId) reloadProfile();
+    return;
+  }
+  if (route.view === 'progress') {
+    const entry = selectedProgressProjectId ? state.progressResult[selectedProgressProjectId] : null;
+    if (selectedProgressProjectId && state.progressDate && (!entry || entry.state !== 'done')) {
+      loadProgressForProject(selectedProgressProjectId, state.progressDate);
+    }
+    return;
+  }
+  // Overview needs no fetch of its own: the stat cards count state.projects,
+  // which loadLatestSnapshot already populated.
+  if (route.view === 'overview') return;
+  if (route.view === 'projects') {
+    if (state.progressDate && state.progressLoadedDate !== state.progressDate) loadProgressAt(state.progressDate);
+  }
+}
+
+// The last hash the app itself wrote or applied. pushState/replaceState do not
+// fire popstate or hashchange, so a URL write can never re-enter the router on
+// its own; this is the belt-and-braces guard for the one path that does fire
+// events for a URL we may have just produced (a hash edited in the address bar
+// of an already-loaded page).
+let lastAppliedHash = null;
+
+function writeUrl(replace) {
+  const hash = buildHash(routeFromState());
+  if (hash !== location.hash) {
+    // Keep pathname and search intact -- only the fragment is ours.
+    const url = `${location.pathname}${location.search}${hash}`;
+    if (replace) history.replaceState(null, '', url);
+    else history.pushState(null, '', url);
+  }
+  lastAppliedHash = location.hash;
+}
+
+// The one way to change what is on screen: update state from the route, write
+// the URL, render, then start the route's fetches.
+function goto(route, { replace = false } = {}) {
+  applyRouteState(route);
+  writeUrl(replace);
+  render();
+  startRouteLoads(route);
+}
+
+// Back/Forward, and a hash pasted into the address bar of a loaded page.
+function applyLocationRoute() {
+  if (location.hash === lastAppliedHash) return;
+  const route = parseRoute(location.hash);
+  // Unknown or malformed routes fall back to Overview, and replace the bad
+  // history entry so Back doesn't walk straight back into it.
+  goto(route || { view: 'overview' }, { replace: true });
+}
+
+window.addEventListener('popstate', applyLocationRoute);
+window.addEventListener('hashchange', applyLocationRoute);
+
+// Sidebar / brand navigation. Nav clicks keep the as-of date the destination
+// page already had -- the stickiness the pre-router view switcher had -- while
+// the route object stays the single source of truth for what gets rendered.
+function navigate(view) {
+  const asOf = view === 'overview' ? state.calendarDate : view === 'projects' ? state.progressDate : null;
+  goto({ view, asOf, filter: currentFilter });
 }
 
 function openFeedback(project = selectedProject(), warningId = null) {
@@ -1138,7 +1663,7 @@ async function saveFeedback() {
     closeFeedback();
     showToast('Review context recorded');
     // The note is stored server-side; refetch so the review history reflects it.
-    await loadProjectSnapshots(project.id);
+    await reloadProfile();
   } catch (error) {
     showToast(error.message || 'Review context could not be recorded.', true);
   } finally {
@@ -1147,8 +1672,11 @@ async function saveFeedback() {
 }
 
 function bindViewEvents() {
+  // Picking a date on Overview navigates to the inventory page's as-of view --
+  // Overview itself no longer renders a per-project list for a date, so the
+  // portfolio-at-a-date question is answered in exactly one place.
   document.getElementById('calendar-date-input')?.addEventListener('change', (event) => {
-    if (event.target.value) loadCalendarSnapshot(event.target.value);
+    if (event.target.value) goto({ view: 'projects', filter: 'All projects', asOf: event.target.value });
   });
   document.getElementById('calendar-clear')?.addEventListener('click', clearCalendarSnapshot);
   document.getElementById('retry-calendar')?.addEventListener('click', () => { if (state.calendarDate) loadCalendarSnapshot(state.calendarDate); });
@@ -1157,44 +1685,53 @@ function bindViewEvents() {
     computeCalendarProjectSnapshot(button.dataset.projectId);
   }));
   document.getElementById('progress-date-input')?.addEventListener('change', (event) => {
-    if (event.target.value) loadProgressAt(event.target.value);
+    if (event.target.value) goto({ view: 'projects', filter: currentFilter, asOf: event.target.value });
   });
   document.getElementById('progress-clear')?.addEventListener('click', clearProgress);
   document.getElementById('retry-progress')?.addEventListener('click', () => { if (state.progressDate) loadProgressAt(state.progressDate); });
+  document.getElementById('retry-progress-detail')?.addEventListener('click', () => {
+    if (selectedProgressProjectId && state.progressDate) loadProgressForProject(selectedProgressProjectId, state.progressDate);
+  });
   document.querySelectorAll('.progress-retry').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
     retryProjectProgress(button.dataset.projectId);
   }));
+  document.querySelectorAll('.view-progress').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openProgressDetail(button.dataset.projectId);
+  }));
+  document.getElementById('progress-back')?.addEventListener('click', () => navigate('projects'));
   document.querySelectorAll('.view-project').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
-    selectedProjectId = button.dataset.projectId;
-    currentView = 'profile';
-    state.profileLoading = true;
-    render();
-    loadProjectSnapshots(selectedProjectId);
+    // Carry the calendar's date into the profile so the drill-down shows the
+    // week the user was looking at, not today's signals.
+    openProject(button.dataset.projectId, state.calendarDate || null);
   }));
   document.querySelectorAll('.insights-row, .project-row').forEach((row) => row.addEventListener('click', () => {
-    selectedProjectId = row.dataset.projectId;
-    currentView = 'profile';
-    state.profileLoading = true;
-    render();
-    loadProjectSnapshots(selectedProjectId);
+    openProject(row.dataset.projectId);
   }));
-  document.getElementById('profile-back')?.addEventListener('click', () => navigate('projects'));
+  document.getElementById('profile-back')?.addEventListener('click', () => {
+    // A historical profile came from the portfolio calendar, so it goes back
+    // to the overview (still pointed at that week); a live one goes back to
+    // the inventory. navigate() carries the calendar date across.
+    navigate(selectedProjectAsOfDate ? 'overview' : 'projects');
+  });
+  document.getElementById('profile-live')?.addEventListener('click', () => openProject(selectedProjectId, null));
   document.querySelectorAll('[data-dashboard-filter]').forEach((button) => button.addEventListener('click', () => {
-    currentFilter = button.dataset.dashboardFilter;
-    navigate('projects');
+    goto({ view: 'projects', filter: button.dataset.dashboardFilter, asOf: state.progressDate });
   }));
-  document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); currentFilter = button.dataset.filter; render(); }));
-  document.getElementById('banner-review')?.addEventListener('click', () => { currentFilter = 'All projects'; navigate('projects'); });
-  document.getElementById('queue-filter')?.addEventListener('click', () => { currentFilter = 'All projects'; navigate('projects'); });
+  document.querySelectorAll('[data-filter]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    goto({ view: 'projects', filter: button.dataset.filter, asOf: state.progressDate });
+  }));
   document.getElementById('add-context')?.addEventListener('click', () => openFeedback());
   document.getElementById('confirm-review')?.addEventListener('click', () => openFeedback());
   document.getElementById('retry-latest')?.addEventListener('click', loadLatestSnapshot);
-  document.getElementById('retry-profile')?.addEventListener('click', () => loadProjectSnapshots(selectedProjectId));
+  document.getElementById('retry-profile')?.addEventListener('click', () => reloadProfile());
 }
 
 document.querySelectorAll('.nav-item').forEach((item) => item.addEventListener('click', () => navigate(item.dataset.view)));
+document.querySelector('.brand-lockup')?.addEventListener('click', () => navigate('overview'));
 document.querySelectorAll('.feedback-options button').forEach((button) => button.addEventListener('click', () => {
   modalFeedback = button.dataset.feedback;
   document.querySelectorAll('.feedback-options button').forEach((option) => option.classList.toggle('selected', option === button));
@@ -1205,13 +1742,21 @@ document.getElementById('modal-backdrop').addEventListener('click', (event) => {
 document.getElementById('modal-save').addEventListener('click', saveFeedback);
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeFeedback(); });
 
-if (location.hash) {
-  const params = new URLSearchParams(location.hash.slice(1));
-  if (viewLabels[params.get('view')]) currentView = params.get('view');
-  if (params.get('project')) selectedProjectId = params.get('project');
-}
+// Cold load. Resolve the route before the first fetch so the deep-linked view
+// is what renders while the portfolio snapshot is loading, and normalize the
+// URL with replaceState -- a legacy `#view=...` link, a bare '#', or garbage
+// all become their canonical route without leaving a junk history entry.
+const bootRoute = parseRoute(location.hash) || { view: 'overview' };
+applyRouteState(bootRoute);
+writeUrl(true);
 
 loadLatestSnapshot().then(() => {
   if (state.error) return;
-  if (currentView === 'profile' && selectedProjectId) loadProjectSnapshots(selectedProjectId);
+  // Fired after the status counts land so the page paints immediately; the
+  // delivery cards fill in on the follow-up render.
+  loadPortfolioDelivery();
+  // startRouteLoads is a deliberate no-op while state.loading is true, so the
+  // route's own fetches -- the profile, its as-of snapshot, either calendar --
+  // start here, once the snapshot they layer on top of has landed.
+  startRouteLoads(routeFromState());
 });

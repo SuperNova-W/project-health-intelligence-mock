@@ -338,6 +338,61 @@ async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[st
     return _snapshot_envelope(snapshots, items)
 
 
+@router.get("/portfolio/delivery")
+async def portfolio_delivery(user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
+    """Portfolio-wide delivery facts, folded from the latest ``repo_activity`` rows.
+
+    Read-only and cache-only: every number here was already captured by the
+    Gitea sync, so this never touches the network. Each repo contributes its
+    most recently synced window once -- ``repo_activity`` is one row per
+    (project, repo, week), so summing the table blindly would multiply a
+    repo's open-PR count by however many weeks it has been tracked, and would
+    double-count any repo shared by two projects.
+
+    Every field is ``None`` rather than ``0`` when nothing was captured, so the
+    UI can distinguish "no open pull requests" from "not synced yet".
+    """
+    database = _db()
+    all_projects = await database.list("projects")
+    ids = set(visible_project_ids(user, [project.project_id for project in all_projects]))
+
+    latest_by_repo: dict[str, Any] = {}
+    for row in await database.list("repo_activity"):
+        if str(getattr(row, "project_id", "")) not in ids:
+            continue
+        slug = str(getattr(row, "repo_slug", "") or "")
+        if not slug:
+            continue
+        current = latest_by_repo.get(slug)
+        if current is None or row.window_start > current.window_start:
+            latest_by_repo[slug] = row
+    rows = list(latest_by_repo.values())
+
+    def _total(field: str) -> int | None:
+        values = [getattr(row, field, None) for row in rows]
+        present = [int(value) for value in values if isinstance(value, (int, float))]
+        return sum(present) if present else None
+
+    oldest_ages = [
+        float(row.oldest_open_pr_days) for row in rows
+        if isinstance(getattr(row, "oldest_open_pr_days", None), (int, float))
+    ]
+    # Contributors are named, so a person on two repos must count once.
+    people: set[str] = set()
+    for row in rows:
+        people.update(str(name) for name in (getattr(row, "contributors", None) or []) if name)
+
+    return {
+        "repos_tracked": len(rows) or None,
+        "open_prs": _total("open_prs"),
+        "oldest_open_pr_days": round(max(oldest_ages), 1) if oldest_ages else None,
+        "branches_ahead": _total("branches_ahead"),
+        "open_issues": _total("open_issues"),
+        "contributors": len(people) or None,
+        "synced_at": max((row.synced_at for row in rows), default=None),
+    }
+
+
 @router.get("/snapshots/at")
 async def snapshot_at_date(
     on: date = Query(alias="date"),
@@ -397,6 +452,43 @@ async def snapshot_at_date(
         "missing_project_ids": [pid for pid in ids if pid not in by_project],
         "computable": bool(settings.llm_active) and week_start < current_week_start,
         "projects": items,
+    }
+
+
+@router.get("/projects/{project_id}/snapshots/at")
+async def project_snapshot_at_date(
+    project_id: str,
+    on: date = Query(alias="date"),
+    user: AuthUser = Depends(require_project_access),
+) -> dict[str, Any]:
+    """One project's persisted snapshot for the ISO week containing ``date``.
+
+    The read-only sibling of the POST below and the per-project counterpart of
+    ``GET /snapshots/at``: cache-only, never computes, and serves exactly the
+    same ``_project_response`` shape the live ``GET /projects/{id}/snapshots``
+    serves, so the profile page can render a historical week with no
+    special-casing. A week with no persisted snapshot returns ``has_data:
+    false`` rather than falling back to a newer week -- the caller must show
+    an honest empty state instead of live data.
+    """
+    project = await _accessible_project(user, project_id)
+    database = _db()
+    week_start = on - timedelta(days=on.weekday())
+    week_end = week_start + timedelta(days=6)
+    rows = [row for row in await database.list("snapshots") if row.project_id == project_id and row.week_start == week_start]
+    snapshot = max(rows, key=lambda row: row.generated_at) if rows else None
+    return {
+        "project_id": project_id,
+        "date": on,
+        "has_data": snapshot is not None,
+        "snapshot_id": _snapshot_id(snapshot) if snapshot else None,
+        "snapshot_week_start": week_start,
+        "snapshot_week_end": week_end,
+        "generated_at": snapshot.generated_at if snapshot else None,
+        "rule_set_version": snapshot.rule_set_version if snapshot else None,
+        "data_completeness_pct": snapshot.data_completeness_pct if snapshot else 0,
+        "last_sync_at": snapshot.last_sync_at if snapshot else None,
+        "project": await _project_response(project, snapshot),
     }
 
 

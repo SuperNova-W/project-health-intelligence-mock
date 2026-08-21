@@ -185,6 +185,8 @@ def _documents_for_row(row: Mapping[str, Any]) -> list[RepoActivityDocument]:
         "oldest_open_pr_days": _as_float(metrics.get("oldest_open_pr_days")),
         "review_latency_days": _as_float(metrics.get("review_latency_days")),
         "merged_count": _as_int(metrics.get("merged_count")),
+        "branches_ahead": _as_int(metrics.get("branches_ahead")),
+        "open_issues": _as_int(metrics.get("open_issues")),
         "aggregation_floor": _as_int(row.get("aggregation_floor")),
         "data_completeness_pct": _as_float(row.get("data_completeness_pct")),
         "contributors": contributors,

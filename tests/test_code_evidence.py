@@ -262,3 +262,55 @@ def test_history_metadata_isolates_per_repo_failures() -> None:
     result = reader.history_metadata(["bad-repo", "good-repo"], start=date(2026, 3, 1), end=date(2026, 3, 31))
     assert result.fetch_errors
     assert sum(result.weeks_counts.values()) == 1
+
+
+def test_history_metadata_follows_x_hasmore_past_a_server_capped_page() -> None:
+    """Gitea caps ``limit`` below what we ask for; a short page is not the last page.
+
+    Real Gitea (MAX_RESPONSE_ITEMS, 50 by default) answers ``limit=100``
+    with 50 items and advertises the rest only via ``X-HasMore``. Treating
+    the short page as the end silently truncated every project's history to
+    its 50 most recent commits, which starved the cumulative-progress
+    shallow layer into reporting "no history" for repos with hundreds of
+    commits.
+    """
+
+    server_cap = 3
+    all_commits = [_commit(f"c{i:04d}", f"subject {i}", "2026-03-04T00:00:00Z") for i in range(7)]
+    seen_pages: list[int] = []
+
+    class CappedPagingClient:
+        def get(self, url: str, params: dict[str, Any] | None = None, **_: Any) -> FakeResponse:
+            params = params or {}
+            page = int(params.get("page", 1))
+            seen_pages.append(page)
+            chunk = all_commits[(page - 1) * server_cap : page * server_cap]
+            response = FakeResponse(payload=chunk)
+            response.headers["x-hasmore"] = "true" if page * server_cap < len(all_commits) else "false"
+            return response
+
+    reader = GiteaCodeEvidenceReader(
+        base_url="https://gitea.example", token="tok", organization="org", client=CappedPagingClient(),
+    )
+    result = reader.history_metadata(["r1"], start=date(2026, 3, 1), end=date(2026, 3, 31))
+    assert sum(result.weeks_counts.values()) == len(all_commits)
+    assert seen_pages == [1, 2, 3]
+    assert result.truncated is False
+
+
+def test_history_metadata_stops_when_x_hasmore_is_false() -> None:
+    calls: list[int] = []
+
+    class SinglePageClient:
+        def get(self, url: str, params: dict[str, Any] | None = None, **_: Any) -> FakeResponse:
+            calls.append(int((params or {}).get("page", 1)))
+            response = FakeResponse(payload=[_commit("a1b2c3d", "only", "2026-03-04T00:00:00Z")])
+            response.headers["x-hasmore"] = "false"
+            return response
+
+    reader = GiteaCodeEvidenceReader(
+        base_url="https://gitea.example", token="tok", organization="org", client=SinglePageClient(),
+    )
+    result = reader.history_metadata(["r1"], start=date(2026, 3, 1), end=date(2026, 3, 31))
+    assert calls == [1]
+    assert sum(result.weeks_counts.values()) == 1

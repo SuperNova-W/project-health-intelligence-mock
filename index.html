@@ -13,32 +13,28 @@
     <script>
       // Points the deployed Vercel frontend at the Render-hosted API.
       // Update this if the Render service is renamed or moves to a custom domain.
-      window.PHI_API_BASE = 'https://project-health-intelligence-mock-2.onrender.com';
+      // TEMP (local testing): commented out so app.js's 127.0.0.1:8000 default is used. Restore before commit/deploy.
+      // window.PHI_API_BASE = 'https://project-health-intelligence-mock-2.onrender.com';
     </script>
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Primary navigation">
-        <div class="brand-lockup">
-          <img class="brand-mark" src="assets/adc-256.png" width="34" height="34" alt="App Dev Club" />
+        <button class="brand-lockup" type="button" data-view="overview" aria-label="Go to Overview">
+          <img class="brand-mark" src="assets/adc-256.png" width="28" height="28" alt="App Dev Club" />
           <div>
             <div class="brand-name">App Dev Horizon</div>
             <div class="brand-caption">INTELLIGENCE</div>
           </div>
-        </div>
+        </button>
 
         <nav class="primary-nav">
-          <button class="nav-item active" data-view="overview"><span class="nav-icon" data-icon="grid"></span><span>Overview</span><span class="nav-count">—</span></button>
           <button class="nav-item" data-view="projects"><span class="nav-icon" data-icon="folder"></span><span>Projects</span></button>
           <button class="nav-item" data-view="insights"><span class="nav-icon" data-icon="trend"></span><span>Insights</span></button>
         </nav>
       </aside>
 
       <main class="main-content">
-        <header class="topbar">
-          <div class="breadcrumbs"><span>App Dev Horizon</span><span class="breadcrumb-slash">/</span><strong id="breadcrumb-current">Overview</strong></div>
-        </header>
-
         <div id="app-view" class="view-container"></div>
       </main>
     </div>
@@ -63,6 +59,6 @@
       </section>
     </div>
 
-    <script src="app.js?v=live-stack-2"></script>
+    <script src="app.js?v=hash-router-1"></script>
   </body>
 </html>

@@ -270,6 +270,47 @@ def _extract_page(payload: Any) -> tuple[list[Mapping[str, Any]], str | None, bo
     return [item for item in raw_results if isinstance(item, Mapping)], next_url, has_more
 
 
+def _open_issue_count(repo: Mapping[str, Any]) -> int | None:
+    """Gitea's own open-issue counter, already present on the repo payload.
+
+    Free -- the repo listing this sync already walked carries it, so no extra
+    request. ``None`` when absent or not a plain number, so a missing field
+    reads as "unknown" rather than as zero open issues.
+    """
+    value = repo.get("open_issues_count")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(0, int(value))
+
+
+def _header_has_more(headers: Any) -> bool:
+    """Does the response advertise more pages in its headers?
+
+    Gitea paginates bare JSON arrays -- the body carries no ``next``/
+    ``pagination`` key at all, so ``_extract_page`` can never see that more
+    pages exist. Gitea also silently caps ``limit`` at its own
+    ``MAX_RESPONSE_ITEMS`` (50 by default), so a page shorter than the
+    requested ``page_size`` is NOT evidence of the last page either. Without
+    this header, ``pages()`` stopped after the first 50 items of every Gitea
+    list endpoint and silently truncated history.
+
+    Only the boolean ``X-HasMore`` is trusted; Gitea's companion ``Link:
+    rel="next"`` URL has been observed pointing back at the page just
+    fetched, which would loop forever. Our own ``page`` counter drives the
+    walk instead.
+    """
+
+    if headers is None:
+        return False
+    getter = getattr(headers, "get", None)
+    if getter is None:
+        return False
+    raw = getter("x-hasmore")
+    if raw is None:
+        raw = getter("X-HasMore")
+    return str(raw).strip().lower() == "true" if raw is not None else False
+
+
 def _safe_relative_or_same_host(url: str, base_url: str) -> str:
     """Keep pagination links on the configured service host."""
 
@@ -333,11 +374,16 @@ class _HttpxAdapter:
         return urljoin(f"{self.base_url}/", path_or_url.lstrip("/"))
 
     def get_json(self, path_or_url: str, params: Mapping[str, Any] | None = None) -> Any:
+        return self._get_json_with_headers(path_or_url, params)[0]
+
+    def _get_json_with_headers(
+        self, path_or_url: str, params: Mapping[str, Any] | None = None
+    ) -> tuple[Any, Any]:
         response = self._get_client().get(self._url(path_or_url), params=dict(params or {}))
         raiser = getattr(response, "raise_for_status", None)
         if raiser is not None:
             raiser()
-        return response.json()
+        return response.json(), getattr(response, "headers", None)
 
     def get_text(self, path_or_url: str, params: Mapping[str, Any] | None = None) -> str:
         response = self._get_client().get(self._url(path_or_url), params=dict(params or {}))
@@ -358,13 +404,23 @@ class _HttpxAdapter:
         page = 1
         next_url: str | None = None
         for _ in range(max_pages):
-            page_params = dict(params or {})
             if next_url is None:
+                page_params = dict(params or {})
                 page_params.setdefault("page", page)
                 page_params.setdefault("limit", page_size)
-            payload = self.get_json(next_url or path, page_params)
+                payload, headers = self._get_json_with_headers(path, page_params)
+            else:
+                # A server-supplied next link already encodes the full query
+                # (filters included). Re-applying ``params`` on top of it would
+                # overwrite that query -- including its ``page`` -- and re-fetch
+                # the same page forever.
+                payload, headers = self._get_json_with_headers(next_url, None)
             page_items, discovered_next, has_more = _extract_page(payload)
             collected.extend(page_items)
+            # Header hints only fill in what the body could not say -- a
+            # bare JSON array (Gitea) has no in-body next link at all.
+            if not discovered_next and not has_more and page_items:
+                has_more = _header_has_more(headers)
             if discovered_next:
                 next_url = discovered_next
             elif has_more:
@@ -923,6 +979,23 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
         timestamps = [timestamp for timestamp in (_review_timestamp(review) for review in reviews) if timestamp]
         return min(timestamps) if timestamps else None
 
+    def _branches_ahead(self, repo_slug: str, default_branch: str) -> int | None:
+        """How many branches exist besides the default one.
+
+        One paginated list call, no per-branch work -- negligible next to the
+        PR-review walk this sync already performs. ``None`` on failure so the
+        caller can tell "no branches" apart from "could not look".
+        """
+        try:
+            branches = self.pages(
+                self._repo_path(repo_slug, "branches"),
+                page_size=self.page_size,
+                max_pages=self.max_pages,
+            )
+        except Exception:
+            return None
+        return sum(1 for branch in branches if str(branch.get("name") or "") != default_branch)
+
     def _commit_pages(
         self,
         repo_slug: str,
@@ -1338,6 +1411,10 @@ class GiteaRepoActivityAdapter(_HttpxAdapter):
             "oldest_open_pr_days": None,
             "review_latency_days": round(sum(latency_values) / len(latency_values), 3) if latency_values else None,
             "merged_count": len(merged_prs),
+            # Both describe the repo as it stands now rather than the sync
+            # window: a branch or an open issue has no week it belongs to.
+            "branches_ahead": self._branches_ahead(repo_slug, str(repo.get("default_branch") or "")),
+            "open_issues": _open_issue_count(repo),
         }
         activity_dates: list[datetime] = []
         for day_value in commit_days:
