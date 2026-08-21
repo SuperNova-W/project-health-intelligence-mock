@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -24,6 +25,8 @@ from .ci_llm import (
 from .config import Settings, get_settings
 from .llm import OpenAIStructuredLLM, LLMUnavailable
 from .db import get_active_repository
+from .jobs import generate_llm_snapshot, get_signal_judge
+from .signal_llm import SIGNAL_VERSION
 from .models import (
     AttentionStatus,
     AuditLogDocument,
@@ -373,6 +376,9 @@ async def snapshot_at_date(
     generated_ats = [item.generated_at for item in snapshots]
     last_syncs = [item.last_sync_at for item in snapshots if item.last_sync_at]
     completeness = round(sum(item.data_completeness_pct for item in snapshots) / len(snapshots), 1) if snapshots else 0
+    settings = get_settings()
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
     return {
         "date": on,
         "has_data": bool(snapshots),
@@ -382,8 +388,70 @@ async def snapshot_at_date(
         "rule_set_version": next(iter(rule_versions)) if len(rule_versions) == 1 else ("mixed" if rule_versions else "none"),
         "data_completeness_pct": completeness,
         "last_sync_at": max(last_syncs) if last_syncs else None,
+        # Which projects have no snapshot for this week yet -- the frontend
+        # renders a "Compute this week" button for each of these, but only
+        # when the week is in the past; the current/future week is the
+        # weekly cron's job, not a per-project lazy compute.
+        "missing_project_ids": [pid for pid in ids if pid not in by_project],
+        "computable": bool(settings.llm_active) and week_start < current_week_start,
         "projects": items,
     }
+
+
+@router.post("/projects/{project_id}/snapshots/at")
+async def compute_project_snapshot_at_date(
+    project_id: str,
+    on: date = Query(alias="date"),
+    user: AuthUser = Depends(require_project_access),
+) -> dict[str, Any]:
+    """Explicit "Compute this week" action for one project's historical week.
+
+    POST, unlike the cache-only ``GET /snapshots/at`` above, because this can
+    write a new immutable snapshot. Refuses the current/future week -- that
+    belongs to the weekly cron (``POST /admin/sync/weekly``), not a
+    per-project lazy compute, since a partial in-progress week would get
+    cached immutably and look wrong for the rest of the week.
+    """
+    project = await _accessible_project(user, project_id)
+    settings = get_settings()
+    week_start = on - timedelta(days=on.weekday())
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    if week_start >= current_week_start:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="the current or a future week is computed by the weekly job, not this endpoint",
+        )
+
+    database = _db()
+    existing = [
+        row for row in await database.list("snapshots")
+        if row.project_id == project_id and row.week_start == week_start and row.rule_set_version == SIGNAL_VERSION
+    ]
+    if existing:
+        return {"project": await _project_response(project, existing[0]), "computed": False, "cached": True}
+
+    if not settings.llm_active:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM signal is not configured")
+
+    judge = get_signal_judge(settings)
+    try:
+        snapshot = await asyncio.wait_for(
+            generate_llm_snapshot(project_id, week_start, settings=settings, database=database, judge=judge),
+            timeout=settings.lazy_compute_timeout_seconds,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="still computing this project's week -- a concurrent request may already be in flight, try again shortly",
+            headers={"Retry-After": "30"},
+        )
+    if snapshot is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="the LLM judgment could not be completed for this week",
+        )
+    return {"project": await _project_response(project, snapshot), "computed": True, "cached": False}
 
 
 @router.get("/projects/{project_id}/snapshots")
