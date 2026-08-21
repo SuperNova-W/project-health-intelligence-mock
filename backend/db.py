@@ -23,6 +23,7 @@ from .errors import ImmutableSnapshotError
 from .models import (
     AuditLogDocument,
     BoundaryDocument,
+    CumulativeCheckpointDocument,
     FeedbackDocument,
     IdentityMapDocument,
     ProjectDocument,
@@ -127,6 +128,17 @@ CREATE TABLE IF NOT EXISTS ci_assessments (
 );
 CREATE INDEX IF NOT EXISTS idx_assessments_pid     ON ci_assessments(project_id);
 CREATE INDEX IF NOT EXISTS idx_assessments_created ON ci_assessments(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS cumulative_checkpoints (
+    id             TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL,
+    as_of_week_start TEXT NOT NULL,
+    signal_version TEXT NOT NULL,
+    data           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_pid ON cumulative_checkpoints(project_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_key
+    ON cumulative_checkpoints(project_id, as_of_week_start, signal_version);
 """
 
 # ---------------------------------------------------------------------------
@@ -149,6 +161,7 @@ _TABLE_MAP: dict[str, str] = {
     "feedback": "feedback",
     "audit_log": "audit_log",
     "assessments": "ci_assessments",
+    "cumulative_checkpoints": "cumulative_checkpoints",
 }
 
 _MODEL_MAP: dict[str, type[Any]] = {
@@ -161,6 +174,7 @@ _MODEL_MAP: dict[str, type[Any]] = {
     "feedback": FeedbackDocument,
     "audit_log": AuditLogDocument,
     "assessments": AssessmentDocument,
+    "cumulative_checkpoints": CumulativeCheckpointDocument,
 }
 
 
@@ -264,6 +278,13 @@ def _extra_cols(logical: str, doc: Any) -> dict[str, Any]:
             "project_id": str(doc.project_id),
             "assessment_id": str(doc.assessment_id),
             "created_at": _date_str(getattr(doc, "created_at", None)) or "",
+        }
+
+    if logical == "cumulative_checkpoints":
+        return {
+            "project_id": str(doc.project_id),
+            "as_of_week_start": _date_str(doc.as_of_week_start),
+            "signal_version": str(doc.signal_version),
         }
 
     return {}

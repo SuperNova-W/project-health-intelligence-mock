@@ -437,6 +437,58 @@ class WeeklySnapshotDocument(PHIDocument):
         raise ImmutableSnapshotError("weekly snapshots are immutable")
 
 
+class CumulativeCheckpointDocument(PHIDocument):
+    """A project's synthesized progress as of a specific date.
+
+    Deliberately a separate table from ``WeeklySnapshotDocument``: keyed on
+    a date rather than an ISO week, and -- unlike weekly snapshots -- a
+    checkpoint for the in-progress current week is a mutable, replaceable
+    provisional row (see ``is_provisional``), not an immutable historical
+    record. Built from a bounded "deep tail" of full diff-judged recent
+    weeks (reusing ``WeeklySnapshotDocument``/``signal_llm`` unchanged) plus
+    a cheap, metadata-only sweep over older history -- see
+    ``backend.cumulative_llm`` and ``backend.jobs.generate_cumulative_checkpoint``.
+    """
+
+    project_id: ProjectId = Field(
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
+    as_of_date: date
+    as_of_week_start: date
+    coverage_start: date
+    signal_version: str = Field(default="cumulative-v1", min_length=1, max_length=80)
+    generated_at: datetime = Field(default_factory=utc_now)
+    model: str = Field(default="", max_length=120)
+
+    status: AttentionStatus
+    confidence: float = Field(ge=0, le=1)
+    trajectory: Literal["accelerating", "steady", "slowing", "stalled", "unknown"] = "unknown"
+    headline: str = Field(max_length=160)
+    narrative: str = Field(max_length=2_000)
+    work_to_date: str = Field(default="none", max_length=20)
+
+    milestones: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
+    open_concerns: list[dict[str, Any]] = Field(default_factory=list, max_length=6)
+    recommendations: list[str] = Field(default_factory=list, max_length=4)
+    data_gaps: list[str] = Field(default_factory=list, max_length=4)
+
+    # Which weeks got full diff-level review vs. commit-metadata-only, so
+    # the UI can show an honest fidelity footnote ("N of M weeks reviewed").
+    weeks_deep_judged: list[date] = Field(default_factory=list, max_length=52)
+    weeks_shallow_counts: dict[str, int] = Field(default_factory=dict)
+
+    source_snapshot_ids: list[DocumentId] = Field(default_factory=list, max_length=52)
+    prior_checkpoint_id: DocumentId | None = None
+    chain_depth: int = Field(default=0, ge=0)
+    history_truncated: bool = False
+    is_provisional: bool = False
+
+    class Settings:
+        name = "cumulative_checkpoints"
+
+
 class WarningDocument(PHIDocument):
     snapshot_id: DocumentId
     project_id: ProjectId = Field(
