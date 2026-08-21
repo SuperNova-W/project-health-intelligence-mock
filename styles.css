@@ -210,9 +210,14 @@ button { border: 0; cursor: pointer; }
 .queue-action { color: var(--ink); background: transparent; font-size: 10px; font-weight: 600; white-space: nowrap; font-family: "JetBrains Mono", monospace; border-bottom: 1px solid var(--line-strong); }
 .queue-action:hover { border-color: var(--ink); }
 .queue-action.compute-pending, .queue-action.compute-disabled { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-faint); border-bottom-color: transparent; cursor: default; }
-.queue-action.compute-week-retry { color: var(--clay); }
+.queue-action.compute-week-retry, .queue-action.progress-retry { color: var(--clay); }
 .spinner { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--ink-soft); animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.trajectory-chip { display: inline-block; padding: 1px 8px; border-radius: var(--r-pill); font: 600 9px "JetBrains Mono", monospace; text-transform: uppercase; letter-spacing: .02em; }
+.trajectory-chip.trajectory-accelerating { color: var(--moss); background: rgba(90,155,90,.14); }
+.trajectory-chip.trajectory-steady { color: var(--ink-soft); background: var(--surface); }
+.trajectory-chip.trajectory-slowing { color: var(--amber); background: rgba(200,150,50,.14); }
+.trajectory-chip.trajectory-stalled { color: var(--clay); background: rgba(190,80,70,.14); }
 
 /* ---------- Pulse trace ---------- */
 .pulse-panel { padding-bottom: 16px; }

@@ -61,6 +61,15 @@ const state = {
   calendarResult: null,
   calendarComputing: new Set(),
   calendarComputeErrors: {},
+  // Projects-page cumulative-progress-as-of-date calendar. Separate from
+  // the calendar* state above by design: the two answer different
+  // questions (one week vs. cumulative-to-date) and stay independent.
+  progressDate: null,
+  progressLoading: false,
+  progressError: null,
+  progressComputable: false,
+  progressResult: {}, // project_id -> { state: 'pending'|'done'|'error', data?, error? }
+  progressRunId: 0,
 };
 
 let currentView = 'overview';
@@ -785,7 +794,9 @@ function renderProjects() {
       : currentFilter === 'Needs attention'
         ? state.projects.filter(isAttentionProject)
         : state.projects.filter((project) => project.status === currentFilter);
-  return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1><p>Every project boundary, current attention status, and data freshness in one place.</p>${snapshotMetaMarkup()}</div><div class="heading-actions"></div></div><section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => `<tr class="project-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td><td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
+  return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1><p>Every project boundary, current attention status, and data freshness in one place.</p>${snapshotMetaMarkup()}</div><div class="heading-actions">${progressControlMarkup()}</div></div>
+    ${progressPanelMarkup()}
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => `<tr class="project-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td><td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
 }
 
 function insightsProjectCell(project) {
@@ -924,6 +935,117 @@ function clearCalendarSnapshot() {
   render();
 }
 
+// ---------------------------------------------------------------------
+// Projects-page cumulative-progress-as-of-date calendar. Picking a date
+// automatically computes every project's progress (bounded client-side
+// concurrency, one request per project) -- no per-project button.
+// ---------------------------------------------------------------------
+
+const PROGRESS_FAN_OUT_CONCURRENCY = 3;
+
+async function loadProgressAt(dateStr) {
+  const runId = ++state.progressRunId;
+  state.progressDate = dateStr;
+  state.progressResult = {};
+  state.progressLoading = true;
+  state.progressError = null;
+  render();
+
+  let raw;
+  try {
+    raw = await requestJson(`/progress/at?date=${encodeURIComponent(dateStr)}`);
+  } catch (error) {
+    if (runId !== state.progressRunId) return;
+    state.progressLoading = false;
+    state.progressError = error;
+    render();
+    return;
+  }
+  if (runId !== state.progressRunId) return;
+
+  const missing = new Set(asArray(raw?.missing_project_ids));
+  const results = {};
+  asArray(raw?.projects).forEach((project) => {
+    if (!missing.has(project.id)) results[project.id] = { state: 'done', data: project };
+  });
+  missing.forEach((id) => { results[id] = { state: 'pending' }; });
+  state.progressResult = results;
+  state.progressLoading = false;
+  state.progressComputable = Boolean(raw?.computable);
+  render();
+
+  const queue = Array.from(missing);
+  const worker = async () => {
+    while (queue.length) {
+      const projectId = queue.shift();
+      await computeProjectProgress(projectId, dateStr, runId);
+    }
+  };
+  await Promise.all(Array.from({ length: PROGRESS_FAN_OUT_CONCURRENCY }, worker));
+}
+
+async function computeProjectProgress(projectId, dateStr, runId) {
+  try {
+    const raw = await requestJson(`/projects/${encodeURIComponent(projectId)}/progress/at?date=${encodeURIComponent(dateStr)}`, { method: 'POST' });
+    if (runId !== state.progressRunId) return; // a newer date pick superseded this request
+    state.progressResult[projectId] = { state: 'done', data: raw?.project };
+    render();
+  } catch (error) {
+    if (runId !== state.progressRunId) return;
+    state.progressResult[projectId] = { state: 'error', error };
+    render();
+  }
+}
+
+function retryProjectProgress(projectId) {
+  if (!state.progressDate) return;
+  const runId = state.progressRunId;
+  state.progressResult[projectId] = { state: 'pending' };
+  render();
+  computeProjectProgress(projectId, state.progressDate, runId);
+}
+
+function clearProgress() {
+  state.progressRunId += 1; // orphan any in-flight fan-out requests
+  state.progressDate = null;
+  state.progressResult = {};
+  state.progressError = null;
+  render();
+}
+
+function progressControlMarkup() {
+  const today = new Date().toISOString().slice(0, 10);
+  return `<div class="calendar-control"><label for="progress-date-input">${icon('calendar')}<span>View progress as of</span></label><input type="date" id="progress-date-input" max="${today}" value="${escapeHtml(state.progressDate || '')}" />${state.progressDate ? '<button class="text-button" id="progress-clear">Back to live ×</button>' : ''}</div>`;
+}
+
+const TRAJECTORY_LABELS = { accelerating: 'Accelerating', steady: 'Steady', slowing: 'Slowing', stalled: 'Stalled', unknown: '' };
+
+function progressRowMarkup(projectId) {
+  const entry = state.progressResult[projectId];
+  const meta = state.projects.find((project) => project.id === projectId) || { id: projectId, name: projectId, team: '', repo: '' };
+  if (!entry || entry.state === 'pending') {
+    return `<div class="queue-item">${monogram(meta)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(meta.name)}</span></div><div class="queue-meta">${escapeHtml(meta.team)} · ${escapeHtml(meta.repo)}</div></div><span class="queue-action compute-pending"><span class="spinner"></span> Computing progress…</span></div>`;
+  }
+  if (entry.state === 'error') {
+    return `<div class="queue-item">${monogram(meta)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(meta.name)}</span></div><div class="queue-meta">${escapeHtml(meta.team)} · ${escapeHtml(meta.repo)}</div></div><button class="queue-action progress-retry" data-project-id="${escapeHtml(projectId)}">Could not compute — Retry</button></div>`;
+  }
+  const project = entry.data || {};
+  const trajectoryLabel = TRAJECTORY_LABELS[project.trajectory] || '';
+  const fidelity = project.weeksTotal ? `${project.weeksDeepJudged} of ${project.weeksTotal} weeks reviewed in depth` : '';
+  return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span><span class="status-pill status-${escapeHtml(project.statusClass)}">${escapeHtml(project.status)}</span>${trajectoryLabel ? `<span class="trajectory-chip trajectory-${escapeHtml(project.trajectory)}">${escapeHtml(trajectoryLabel)}</span>` : ''}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.headline || '')}</strong>${fidelity ? `<span class="mono">${escapeHtml(fidelity)}</span>` : ''}</div></div>`;
+}
+
+function progressPanelMarkup() {
+  if (!state.progressDate) return '';
+  if (state.progressLoading) return `<section class="panel calendar-panel">${loadingPanel('Loading portfolio progress…')}</section>`;
+  if (state.progressError) return `<section class="panel calendar-panel">${errorPanel(state.progressError.message || 'That date could not be loaded.', 'retry-progress')}</section>`;
+  const ids = Object.keys(state.progressResult);
+  const subtitle = state.progressComputable
+    ? 'Cumulative standing as of this date, built from evidence available up to it -- computed automatically for every project.'
+    : 'LLM signal is not configured, so progress cannot be computed.';
+  return `<section class="panel calendar-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio progress as of ${escapeHtml(formatDate(state.progressDate))}</h2><p class="panel-subtitle">${escapeHtml(subtitle)}</p></div></div><div class="queue-list">${ids.length ? ids.map(progressRowMarkup).join('') : '<div class="history-empty" style="padding:20px;">No projects to show.</div>'}</div></section>`;
+}
+
 function projectFromSnapshotResponse(raw, projectId) {
   const withProfileAssessment = (project, envelope) => {
     if (!project || typeof project !== 'object' || !envelope || typeof envelope !== 'object') return project;
@@ -1033,6 +1155,15 @@ function bindViewEvents() {
   document.querySelectorAll('.compute-week, .compute-week-retry').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
     computeCalendarProjectSnapshot(button.dataset.projectId);
+  }));
+  document.getElementById('progress-date-input')?.addEventListener('change', (event) => {
+    if (event.target.value) loadProgressAt(event.target.value);
+  });
+  document.getElementById('progress-clear')?.addEventListener('click', clearProgress);
+  document.getElementById('retry-progress')?.addEventListener('click', () => { if (state.progressDate) loadProgressAt(state.progressDate); });
+  document.querySelectorAll('.progress-retry').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    retryProjectProgress(button.dataset.projectId);
   }));
   document.querySelectorAll('.view-project').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
