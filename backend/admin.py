@@ -213,3 +213,45 @@ async def trigger_discover_projects(
         "boundaries_updated": updated_boundaries,
         "skipped_orgs": skipped,
     }
+
+
+@router.get("/diagnostics/gitea-diff")
+async def diagnose_gitea_diff(
+    org: str,
+    repo: str,
+    sha: str,
+    x_admin_sync_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """One-off check that the deployed Gitea instance/token can serve raw commit diffs.
+
+    Exists to verify ``GET /repos/{org}/{repo}/git/commits/{sha}.diff`` (the
+    endpoint the lazy LLM-signal feature depends on for real code evidence)
+    without ever exposing ``PHI_GITEA_API_TOKEN`` to the caller -- the token
+    stays server-side, only a status code and a content preview come back.
+    """
+    _check_token(x_admin_sync_token)
+    settings = get_settings()
+    if not settings.gitea_url or not settings.gitea_api_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PHI_GITEA_URL and PHI_GITEA_API_TOKEN must both be set",
+        )
+    import httpx
+
+    url = f"{settings.gitea_url.rstrip('/')}/api/v1/repos/{org}/{repo}/git/commits/{sha}.diff"
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        try:
+            response = await client.get(
+                url, headers={"Authorization": f"token {settings.gitea_api_token}"}
+            )
+        except Exception as exc:
+            return {"ok": False, "url": url, "error": str(exc)}
+    body = response.text
+    return {
+        "ok": response.status_code == 200 and body.lstrip().startswith("diff "),
+        "url": url,
+        "status_code": response.status_code,
+        "content_type": response.headers.get("content-type"),
+        "byte_length": len(body.encode("utf-8", errors="replace")),
+        "preview": body[:300],
+    }
