@@ -446,11 +446,6 @@ async def compute_project_snapshot_at_date(
             detail="still computing this project's week -- a concurrent request may already be in flight, try again shortly",
             headers={"Retry-After": "30"},
         )
-    except Exception as exc:  # TEMP: surface the real error while verifying against live Gitea/OpenAI
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"{type(exc).__name__}: {exc}",
-        )
     if snapshot is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
