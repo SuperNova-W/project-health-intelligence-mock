@@ -72,6 +72,9 @@ class DiffLimits:
     tier1_max_commits: int = 5
     tier1_max_files: int = 10
     tier1_max_lines: int = 150
+    # /commits (and this reader) intentionally track the default branch
+    # only, by product decision -- unmerged feature-branch work is not
+    # counted until it lands on main.
 
 
 DEFAULT_LIMITS = DiffLimits()
@@ -239,6 +242,7 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
         return f"/api/v1/repos/{quote(self.organization, safe='')}/{quote(repo_slug, safe='')}/{suffix.lstrip('/')}"
 
     def commits_in_window(self, repo_slug: str, *, since: datetime, until: datetime) -> list[Mapping[str, Any]]:
+        # Default branch only, by design -- see DiffLimits' docstring note.
         return self.pages(
             self._repo_path(repo_slug, "commits"),
             params={"since": _iso(since), "until": _iso(until)},
