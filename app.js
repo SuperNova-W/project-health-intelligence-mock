@@ -89,6 +89,18 @@ const state = {
   // result covers only one row of the list.
   progressLoadedDate: null,
   progressRunId: 0,
+  // Viewport-gated lazy compute for the *live* dashboard (the Projects and
+  // Insights tables), distinct from the calendar* state above: that one
+  // answers "as of a date I picked", this one fills in the current view for
+  // projects GET /snapshots/latest had no snapshot for at all. Each id is
+  // computed only once its row scrolls into view, so a cold database costs
+  // one LLM request per project actually looked at rather than one per
+  // project in the portfolio.
+  lazyWeekStart: null,
+  lazyComputable: false,
+  lazyMissing: new Set(),
+  lazyComputing: new Set(),
+  lazyErrors: {},
 };
 
 let currentView = 'overview';
@@ -772,14 +784,21 @@ function calendarPanelMarkup() {
     if (isMissing) {
       const isComputing = state.calendarComputing.has(project.id);
       const computeError = state.calendarComputeErrors[project.id];
+      // No "Compute this week" button any more: a missing row that is on
+      // screen computes itself. Only the error case still needs a click,
+      // so a failed project cannot re-spend a request every time it
+      // scrolls back into view.
       const action = isComputing
         ? '<span class="queue-action compute-pending"><span class="spinner"></span> Computing…</span>'
         : computeError
-          ? `<button class="queue-action compute-week-retry" data-project-id="${escapeHtml(project.id)}">Could not compute — Retry</button>`
+          ? `<button class="queue-action compute-week-retry lazy-retry" data-project-id="${escapeHtml(project.id)}" data-lazy-kind="calendar">Could not compute — Retry</button>`
           : computable
-            ? `<button class="queue-action compute-week" data-project-id="${escapeHtml(project.id)}">Compute this week</button>`
+            ? '<span class="queue-action compute-pending"><span class="spinner"></span> Computing…</span>'
             : '<span class="queue-action compute-disabled">LLM signal not configured</span>';
-      return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span></div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><span class="mono">No snapshot computed for this week yet.</span></div>${action}</div>`;
+      const lazyAttrs = (!isComputing && !computeError && computable)
+        ? ` data-lazy-project="${escapeHtml(project.id)}" data-lazy-kind="calendar"`
+        : '';
+      return `<div class="queue-item"${lazyAttrs}>${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span></div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><span class="mono">No snapshot computed for this week yet.</span></div>${action}</div>`;
     }
     return `<div class="queue-item">${monogram(project)}<div class="queue-main"><div class="queue-name-line"><span class="queue-name">${escapeHtml(project.name)}</span>${statusPill(project)}</div><div class="queue-meta">${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</div></div><div class="queue-signal"><strong>${escapeHtml(project.signal)}</strong><span class="mono">${escapeHtml(project.signalDetail)}</span></div><button class="queue-action view-project" data-project-id="${escapeHtml(project.id)}">View project</button></div>`;
   };
@@ -840,7 +859,14 @@ function renderProjects() {
         : state.projects.filter((project) => project.status === currentFilter);
   return `<div class="page-heading"><div><span class="eyebrow">Portfolio inventory</span><h1>All projects</h1></div><div class="heading-actions">${progressControlMarkup()}</div></div>
     ${progressPanelMarkup()}
-    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => `<tr class="project-row" data-project-id="${escapeHtml(project.id)}"><td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td><td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Project inventory</h2><p class="panel-subtitle">${filtered.length} of ${state.projects.length} projects shown</p></div><div class="filter-row">${filters.map((filter) => `<button class="filter-button ${currentFilter === filter ? 'active' : ''}" data-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join('')}</div></div><div class="table-scroll"><table class="projects-table"><thead><tr><th>Project</th><th>Status</th><th>Signal</th><th>Active</th><th>Coverage</th></tr></thead><tbody>${filtered.length ? filtered.map((project) => {
+      const identityCell = `<td><div class="table-project">${monogram(project, 'sm')}<div><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.team)} · ${escapeHtml(project.repo)}</span></div></div></td>`;
+      // A project with no snapshot keeps its identity cell and replaces the
+      // four data columns with the lazy placeholder, so the table's shape
+      // holds steady as rows fill in.
+      if (lazyRowState(project.id)) return `<tr class="project-row lazy-row" data-project-id="${escapeHtml(project.id)}"${lazyRowAttrs(project.id)}>${identityCell}${lazyCellMarkup(project.id, 4)}</tr>`;
+      return `<tr class="project-row" data-project-id="${escapeHtml(project.id)}">${identityCell}<td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`;
+    }).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
 }
 
 function insightsProjectCell(project) {
@@ -851,7 +877,10 @@ function renderInsights() {
   const showContributorColumn = state.projects.some((project) => hasOwn(project.metrics, 'active_contributors'));
   const contributorHeader = showContributorColumn ? '<th>Active contributors <span>aggregate only</span></th>' : '';
   const contributorCell = (project) => showContributorColumn ? `<td>${hasOwn(project.metrics, 'active_contributors') ? chartCaption('', project.metrics.active_contributors, project.seriesBaselines.contributors?.[0]) : '<div class="chart-caption"><span class="chart-caption-label"></span><span class="chart-caption-value">—</span></div>'}</td>` : '';
-  return `<div class="page-heading"><div><span class="eyebrow">Combined view · last 8 weeks</span><h1>Insights</h1><p>Aggregate activity, review flow, and contributor counts where the server aggregation floor permits.</p>${snapshotMetaMarkup()}</div></div><section class="panel"><div class="table-scroll"><table class="insights-table"><thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th>${contributorHeader}</tr></thead><tbody>${state.projects.length ? state.projects.map((project) => `<tr class="insights-row" data-project-id="${escapeHtml(project.id)}"><td>${insightsProjectCell(project)}</td><td>${chartCaption('', metricValue(project.metrics, 'active_days', lastValue(project.series.activity)), project.seriesBaselines.activity?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'open_prs', lastValue(project.series.openPRs)), project.seriesBaselines.openPRs?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'review_latency_days', lastValue(project.series.reviewLatency)), project.seriesBaselines.reviewLatency?.[0], 'd')}</td>${contributorCell(project)}</tr>`).join('') : `<tr><td colspan="${showContributorColumn ? 5 : 4}"><div class="history-empty">No project metrics returned.</div></td></tr>`}</tbody></table></div></section>`;
+  return `<div class="page-heading"><div><span class="eyebrow">Combined view · last 8 weeks</span><h1>Insights</h1><p>Aggregate activity, review flow, and contributor counts where the server aggregation floor permits.</p>${snapshotMetaMarkup()}</div></div><section class="panel"><div class="table-scroll"><table class="insights-table"><thead><tr><th>Project</th><th>Activity <span>days/wk</span></th><th>Open PRs</th><th>Review latency</th>${contributorHeader}</tr></thead><tbody>${state.projects.length ? state.projects.map((project) => {
+      if (lazyRowState(project.id)) return `<tr class="insights-row lazy-row" data-project-id="${escapeHtml(project.id)}"${lazyRowAttrs(project.id)}><td>${insightsProjectCell(project)}</td>${lazyCellMarkup(project.id, showContributorColumn ? 4 : 3)}</tr>`;
+      return `<tr class="insights-row" data-project-id="${escapeHtml(project.id)}"><td>${insightsProjectCell(project)}</td><td>${chartCaption('', metricValue(project.metrics, 'active_days', lastValue(project.series.activity)), project.seriesBaselines.activity?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'open_prs', lastValue(project.series.openPRs)), project.seriesBaselines.openPRs?.[0])}</td><td>${chartCaption('', metricValue(project.metrics, 'review_latency_days', lastValue(project.series.reviewLatency)), project.seriesBaselines.reviewLatency?.[0], 'd')}</td>${contributorCell(project)}</tr>`;
+    }).join('') : `<tr><td colspan="${showContributorColumn ? 5 : 4}"><div class="history-empty">No project metrics returned.</div></td></tr>`}</tbody></table></div></section>`;
 }
 
 // Banner shown on a profile opened from the portfolio-as-of-date calendar, so
@@ -897,7 +926,12 @@ function renderGlobalError() {
   return `<div class="page-heading"><div><span class="eyebrow">Connected data</span><h1>App Dev Horizon is unavailable</h1><p>The latest snapshot could not be loaded.</p></div></div>${errorPanel(state.error?.message || 'The latest snapshot request failed.')}`;
 }
 
-function render() {
+// `preserveScroll` is for renders that are a data update rather than a
+// navigation -- a lazy row filling in must not yank the page back to the top,
+// which would also change which rows are on screen and so which ones the
+// observer decides to compute next.
+function render(preserveScroll = false) {
+  const scrollY = preserveScroll ? window.scrollY : 0;
   const appView = document.getElementById('app-view');
   if (state.loading) appView.innerHTML = renderLoading();
   else if (state.error) appView.innerHTML = renderGlobalError();
@@ -923,7 +957,8 @@ function render() {
   document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.view === navActiveView));
   updateChrome();
   bindViewEvents();
-  window.scrollTo(0, 0);
+  bindLazyCompute();
+  window.scrollTo(0, scrollY);
 }
 
 function selectedProject() {
@@ -955,6 +990,11 @@ async function loadLatestSnapshot() {
     const raw = await requestJson('/snapshots/latest');
     state.snapshot = normalizeSnapshot(raw);
     state.projects = state.snapshot.projects;
+    state.lazyWeekStart = firstDefined(raw?.lazy_week_start, null);
+    state.lazyComputable = Boolean(raw?.computable);
+    state.lazyMissing = new Set(asArray(raw?.missing_project_ids));
+    state.lazyComputing = new Set();
+    state.lazyErrors = {};
     state.loading = false;
     if (!selectedProjectId && state.projects[0]) selectedProjectId = state.projects[0].id;
     render();
@@ -975,6 +1015,108 @@ async function loadPortfolioDelivery() {
     state.delivery = null;
   }
   render();
+}
+
+// ---------------------------------------------------------------------
+// Viewport-gated lazy compute. Both lazy surfaces -- the live dashboard
+// tables and the as-of-date calendar -- mark a row with data-lazy-project
+// when it has no snapshot yet; bindLazyCompute() observes those rows and
+// fires the POST only once one is on screen. Nothing here is ever driven by
+// a button: a row that is visible is a row that gets computed.
+// ---------------------------------------------------------------------
+
+// Start the request slightly before the row is actually visible, so the
+// result usually lands by the time the reviewer has scrolled to it.
+const LAZY_ROOT_MARGIN = '200px';
+let lazyObserver = null;
+
+// Which of the two lazy surfaces a row belongs to. They write to different
+// state (state.projects vs. state.calendarResult.projects) and post to a
+// different week, so the row carries its channel rather than the observer
+// guessing from the current view.
+function lazyComputeFor(kind, projectId) {
+  if (!projectId) return;
+  if (kind === 'calendar') computeCalendarProjectSnapshot(projectId);
+  else computeLatestProjectSnapshot(projectId);
+}
+
+function bindLazyCompute() {
+  const rows = document.querySelectorAll('[data-lazy-project]');
+  if (!('IntersectionObserver' in window)) {
+    // Without observer support, compute every pending row immediately. That
+    // costs more requests than the lazy path, but a browser that cannot
+    // observe would otherwise sit on placeholder rows forever.
+    rows.forEach((node) => lazyComputeFor(node.dataset.lazyKind, node.dataset.lazyProject));
+    return;
+  }
+  // render() replaces the view's whole innerHTML, so every observed node is
+  // destroyed on each paint; the observer is rebuilt here rather than once
+  // at boot. The observed set only ever shrinks -- a row that starts
+  // computing loses its data-lazy-project attribute -- so this cannot loop.
+  if (lazyObserver) lazyObserver.disconnect();
+  lazyObserver = new IntersectionObserver((entries, observer) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      observer.unobserve(entry.target);
+      lazyComputeFor(entry.target.dataset.lazyKind, entry.target.dataset.lazyProject);
+    });
+  }, { rootMargin: LAZY_ROOT_MARGIN });
+  rows.forEach((node) => lazyObserver.observe(node));
+}
+
+async function computeLatestProjectSnapshot(projectId) {
+  if (!state.lazyComputable || !state.lazyWeekStart) return;
+  if (!state.lazyMissing.has(projectId) || state.lazyComputing.has(projectId)) return;
+  state.lazyComputing.add(projectId);
+  delete state.lazyErrors[projectId];
+  render(true);
+  try {
+    const raw = await requestJson(`/projects/${encodeURIComponent(projectId)}/snapshots/at?date=${encodeURIComponent(state.lazyWeekStart)}`, { method: 'POST' });
+    const updated = normalizeProject(raw?.project, state.snapshot || {});
+    state.projects = state.projects.map((project) => (project.id === projectId ? updated : project));
+    // state.snapshot.projects is what selectedProject() falls back to, so it
+    // has to track the list rather than keep serving the pre-compute row.
+    if (state.snapshot) state.snapshot.projects = state.projects;
+    state.lazyMissing.delete(projectId);
+  } catch (error) {
+    // Left in lazyMissing so the row keeps its placeholder and offers a
+    // retry -- but it is no longer observed, so scrolling past it again
+    // cannot silently re-spend an LLM request on a project that just failed.
+    state.lazyErrors[projectId] = error;
+  } finally {
+    state.lazyComputing.delete(projectId);
+    render(true);
+  }
+}
+
+// Row state for a project the live dashboard has no snapshot for. null means
+// the project has real data and renders normally.
+function lazyRowState(projectId) {
+  if (state.lazyComputing.has(projectId)) return 'computing';
+  if (state.lazyErrors[projectId]) return 'error';
+  if (!state.lazyMissing.has(projectId)) return null;
+  return state.lazyComputable ? 'pending' : 'unavailable';
+}
+
+// Only a 'pending' row is observed. A computing row has a request in flight,
+// an errored one waits for an explicit retry, and an unavailable one has no
+// LLM configured to compute it with.
+function lazyRowAttrs(projectId, kind = 'latest') {
+  return lazyRowState(projectId) === 'pending'
+    ? ` data-lazy-project="${escapeHtml(projectId)}" data-lazy-kind="${escapeHtml(kind)}"`
+    : '';
+}
+
+function lazyCellMarkup(projectId, colspan, kind = 'latest') {
+  const status = lazyRowState(projectId);
+  const body = status === 'computing'
+    ? '<span class="lazy-note"><span class="spinner"></span>Computing this week’s signal…</span>'
+    : status === 'error'
+      ? `<button class="lazy-retry" data-project-id="${escapeHtml(projectId)}" data-lazy-kind="${escapeHtml(kind)}">Could not compute — Retry</button>`
+      : status === 'unavailable'
+        ? '<span class="lazy-note mono">No snapshot yet; LLM signal is not configured.</span>'
+        : '<span class="lazy-note mono">Not computed yet — scroll into view to compute.</span>';
+  return `<td colspan="${colspan}">${body}</td>`;
 }
 
 async function loadCalendarSnapshot(dateStr) {
@@ -1005,7 +1147,7 @@ async function computeCalendarProjectSnapshot(projectId) {
   if (!state.calendarDate || state.calendarComputing.has(projectId)) return;
   state.calendarComputing.add(projectId);
   delete state.calendarComputeErrors[projectId];
-  render();
+  render(true);
   try {
     const raw = await requestJson(`/projects/${encodeURIComponent(projectId)}/snapshots/at?date=${encodeURIComponent(state.calendarDate)}`, { method: 'POST' });
     const updated = normalizeProject(raw?.project, state.calendarResult || {});
@@ -1015,7 +1157,7 @@ async function computeCalendarProjectSnapshot(projectId) {
     state.calendarComputeErrors[projectId] = error;
   } finally {
     state.calendarComputing.delete(projectId);
-    render();
+    render(true);
   }
 }
 
@@ -1082,11 +1224,11 @@ async function computeProjectProgress(projectId, dateStr, runId) {
     const raw = await requestJson(`/projects/${encodeURIComponent(projectId)}/progress/at?date=${encodeURIComponent(dateStr)}`, { method: 'POST' });
     if (runId !== state.progressRunId) return; // a newer date pick superseded this request
     state.progressResult[projectId] = { state: 'done', data: raw?.project };
-    render();
+    render(true);
   } catch (error) {
     if (runId !== state.progressRunId) return;
     state.progressResult[projectId] = { state: 'error', error };
-    render();
+    render(true);
   }
 }
 
@@ -1129,7 +1271,7 @@ function retryProjectProgress(projectId) {
   if (!state.progressDate) return;
   const runId = state.progressRunId;
   state.progressResult[projectId] = { state: 'pending' };
-  render();
+  render(true);
   computeProjectProgress(projectId, state.progressDate, runId);
 }
 
@@ -1680,9 +1822,19 @@ function bindViewEvents() {
   });
   document.getElementById('calendar-clear')?.addEventListener('click', clearCalendarSnapshot);
   document.getElementById('retry-calendar')?.addEventListener('click', () => { if (state.calendarDate) loadCalendarSnapshot(state.calendarDate); });
-  document.querySelectorAll('.compute-week, .compute-week-retry').forEach((button) => button.addEventListener('click', (event) => {
+  // Retry is the one lazy action still driven by a click; everything else
+  // fires from the observer. Clearing the recorded error first is what puts
+  // the row back into the 'pending' state the compute functions require.
+  document.querySelectorAll('.lazy-retry').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
-    computeCalendarProjectSnapshot(button.dataset.projectId);
+    const projectId = button.dataset.projectId;
+    if (button.dataset.lazyKind === 'calendar') {
+      delete state.calendarComputeErrors[projectId];
+      computeCalendarProjectSnapshot(projectId);
+    } else {
+      delete state.lazyErrors[projectId];
+      computeLatestProjectSnapshot(projectId);
+    }
   }));
   document.getElementById('progress-date-input')?.addEventListener('change', (event) => {
     if (event.target.value) goto({ view: 'projects', filter: currentFilter, asOf: event.target.value });

@@ -255,10 +255,23 @@ async def _project_response(project: Any, snapshot: WeeklySnapshotDocument | Non
     assessment = _assessment_view(await _assessment_for(project.project_id))
     if snapshot is None:
         status_value, status_class = "Insufficient data", "data"
+        # Resolve the *current* boundary rather than reporting "Unassigned".
+        # With lazy compute this branch is the ordinary cold-start row -- the
+        # placeholder a reviewer looks at while the week is being computed --
+        # so it has to carry enough identity to tell the projects apart. The
+        # snapshot branch below resolves the boundary as of its own week; here
+        # there is no week yet, so the latest version is the honest answer.
+        no_snapshot_boundary = await _db().boundary_at(project.project_id)
+        team = no_snapshot_boundary.root_authentik_team_id if no_snapshot_boundary else "Unassigned"
+        repo = (
+            no_snapshot_boundary.primary_repos[0].repo_slug
+            if no_snapshot_boundary and no_snapshot_boundary.primary_repos
+            else "—"
+        )
         return ProjectResponse(
-            id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team="Unassigned", repo="—",
+            id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team=team, repo=repo,
             status=status_value, statusClass=status_class, signal="No snapshot available", signalDetail="Data is not yet sufficient for a trusted assessment.", lastActivity="—", trend="flat", weeks=[None] * 8,
-            flagFrom=99, seriesBaselines={"openPRs": [None, None], "reviewLatency": [None, None], "contributors": None}, series={"activity": [None] * 8, "openPRs": [None] * 8, "reviewLatency": [None] * 8, "contributors": None}, description="", boundary=BoundaryView(rootTeam="Unassigned", lifecycle=project.lifecycle_state.value), history=await _history(project.project_id), snapshot_id=None, healthAssessment=assessment,
+            flagFrom=99, seriesBaselines={"openPRs": [None, None], "reviewLatency": [None, None], "contributors": None}, series={"activity": [None] * 8, "openPRs": [None] * 8, "reviewLatency": [None] * 8, "contributors": None}, description="", boundary=BoundaryView(rootTeam=team, lifecycle=project.lifecycle_state.value), history=await _history(project.project_id), snapshot_id=None, healthAssessment=assessment,
         ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
     status_value, status_class = _pretty_status(snapshot.attention_status)
@@ -323,11 +336,22 @@ async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
 
 @router.get("/snapshots/latest")
 async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
+    """The live dashboard read: every project's most recent persisted snapshot.
+
+    Cache-only, like every other GET here. A project with no snapshot at all
+    is still returned -- in its empty ``_project_response`` shape -- and its
+    id is listed in ``missing_project_ids`` so the frontend can compute it
+    lazily, one row at a time, as the reviewer scrolls it into view. That is
+    what lets a database with no ingested history (a fresh deploy, or a host
+    whose disk does not survive one) render real signals without a sync job
+    having run first.
+    """
     database = _db()
     all_projects = await database.list("projects")
     ids = visible_project_ids(user, [project.project_id for project in all_projects])
     items: list[dict[str, Any]] = []
     snapshots: list[WeeklySnapshotDocument] = []
+    missing: list[str] = []
     for project_id in ids:
         snapshot = await database.latest_snapshot(project_id)
         if snapshot:
@@ -335,7 +359,22 @@ async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[st
         project = await database.get_project(project_id)
         if project:
             items.append(await _project_response(project, snapshot))
-    return _snapshot_envelope(snapshots, items)
+            # Only a project that actually rendered a row can be lazily
+            # filled in, so an id with no project document is not "missing".
+            if snapshot is None:
+                missing.append(project_id)
+    envelope = _snapshot_envelope(snapshots, items)
+    settings = get_settings()
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    envelope["missing_project_ids"] = missing
+    envelope["computable"] = bool(settings.llm_active)
+    # The most recent *completed* ISO week, which is the newest week the lazy
+    # fan-out can ask for: POST /projects/{id}/snapshots/at refuses the
+    # in-progress week, since weekly_snapshots is immutable and caching a
+    # partial week would freeze a wrong verdict for the rest of it.
+    envelope["lazy_week_start"] = current_week_start - timedelta(days=7)
+    return envelope
 
 
 @router.get("/portfolio/delivery")
