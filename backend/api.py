@@ -26,6 +26,7 @@ from .config import Settings, get_settings
 from .cumulative_llm import CUMULATIVE_VERSION
 from .llm import OpenAIStructuredLLM, LLMUnavailable
 from .db import get_active_repository
+from .discovery import ensure_projects_registered
 from .jobs import generate_cumulative_checkpoint, generate_llm_snapshot, get_signal_judge
 from .signal_llm import SIGNAL_VERSION
 from .models import (
@@ -53,6 +54,22 @@ router = APIRouter()
 
 def _db() -> Any:
     return get_active_repository()
+
+
+async def _visible_project_ids(database: Any, user: AuthUser) -> list[str]:
+    """Every project id ``user`` may see, bootstrapping a cold registry first.
+
+    ``ensure_projects_registered`` is a no-op the moment any project exists,
+    so this is one extra collection read on a warm database. On an empty one
+    -- a fresh deploy, or a host whose disk does not survive one -- it
+    registers a project per Gitea org before the listing, which is what turns
+    the whole lazy path on: the rows have to exist before ``/snapshots/latest``
+    can name them missing and the frontend can fill them in as they scroll
+    into view. It never pulls history; that stays lazy and per project.
+    """
+    await ensure_projects_registered(settings=get_settings(), database=database)
+    projects = await database.list("projects")
+    return visible_project_ids(user, [project.project_id for project in projects])
 
 
 class FeedbackRequest(BaseModel):
@@ -255,10 +272,23 @@ async def _project_response(project: Any, snapshot: WeeklySnapshotDocument | Non
     assessment = _assessment_view(await _assessment_for(project.project_id))
     if snapshot is None:
         status_value, status_class = "Insufficient data", "data"
+        # Resolve the *current* boundary rather than reporting "Unassigned".
+        # With lazy compute this branch is the ordinary cold-start row -- the
+        # placeholder a reviewer looks at while the week is being computed --
+        # so it has to carry enough identity to tell the projects apart. The
+        # snapshot branch below resolves the boundary as of its own week; here
+        # there is no week yet, so the latest version is the honest answer.
+        no_snapshot_boundary = await _db().boundary_at(project.project_id)
+        team = no_snapshot_boundary.root_authentik_team_id if no_snapshot_boundary else "Unassigned"
+        repo = (
+            no_snapshot_boundary.primary_repos[0].repo_slug
+            if no_snapshot_boundary and no_snapshot_boundary.primary_repos
+            else "—"
+        )
         return ProjectResponse(
-            id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team="Unassigned", repo="—",
+            id=project.project_id, name=project.display_name, short=project.display_name[:2].upper(), team=team, repo=repo,
             status=status_value, statusClass=status_class, signal="No snapshot available", signalDetail="Data is not yet sufficient for a trusted assessment.", lastActivity="—", trend="flat", weeks=[None] * 8,
-            flagFrom=99, seriesBaselines={"openPRs": [None, None], "reviewLatency": [None, None], "contributors": None}, series={"activity": [None] * 8, "openPRs": [None] * 8, "reviewLatency": [None] * 8, "contributors": None}, description="", boundary=BoundaryView(rootTeam="Unassigned", lifecycle=project.lifecycle_state.value), history=await _history(project.project_id), snapshot_id=None, healthAssessment=assessment,
+            flagFrom=99, seriesBaselines={"openPRs": [None, None], "reviewLatency": [None, None], "contributors": None}, series={"activity": [None] * 8, "openPRs": [None] * 8, "reviewLatency": [None] * 8, "contributors": None}, description="", boundary=BoundaryView(rootTeam=team, lifecycle=project.lifecycle_state.value), history=await _history(project.project_id), snapshot_id=None, healthAssessment=assessment,
         ).model_dump(mode="json", by_alias=True, exclude_none=True)
 
     status_value, status_class = _pretty_status(snapshot.attention_status)
@@ -317,17 +347,38 @@ async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "sqlite_path": settings.sqlite_path,
         "directory_source": "people_portal" if settings.people_portal_url else "authentik" if settings.authentik_url else None,
         "people_portal_configured": bool(settings.people_portal_url),
+        # Without both of these the cold-start bootstrap in
+        # backend.discovery cannot register any project, and the dashboard
+        # stays empty however many times it is reloaded -- worth being able
+        # to check from outside the container.
+        "gitea_configured": bool(settings.gitea_url and settings.gitea_api_token),
+        "llm_configured": bool(settings.llm_active),
         "outbound_notifications": False,
     }
 
 
 @router.get("/snapshots/latest")
 async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
+    """The live dashboard read: every project's most recent persisted snapshot.
+
+    Cache-only, like every other GET here. A project with no snapshot at all
+    is still returned -- in its empty ``_project_response`` shape -- and its
+    id is listed in ``missing_project_ids`` so the frontend can compute it
+    lazily, one row at a time, as the reviewer scrolls it into view. That is
+    what lets a database with no ingested history (a fresh deploy, or a host
+    whose disk does not survive one) render real signals without a sync job
+    having run first.
+
+    Cache-only covers the *snapshots*. The project registry underneath them
+    is not cache-only: ``_visible_project_ids`` registers a project per Gitea
+    org the first time it finds the collection empty, because rows have to
+    exist before any of the above can name them missing.
+    """
     database = _db()
-    all_projects = await database.list("projects")
-    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    ids = await _visible_project_ids(database, user)
     items: list[dict[str, Any]] = []
     snapshots: list[WeeklySnapshotDocument] = []
+    missing: list[str] = []
     for project_id in ids:
         snapshot = await database.latest_snapshot(project_id)
         if snapshot:
@@ -335,7 +386,27 @@ async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[st
         project = await database.get_project(project_id)
         if project:
             items.append(await _project_response(project, snapshot))
-    return _snapshot_envelope(snapshots, items)
+            # Only a project that actually rendered a row can be lazily
+            # filled in, so an id with no project document is not "missing".
+            if snapshot is None:
+                missing.append(project_id)
+    envelope = _snapshot_envelope(snapshots, items)
+    settings = get_settings()
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    envelope["missing_project_ids"] = missing
+    envelope["computable"] = bool(settings.llm_active)
+    # An empty portfolio has two very different causes -- a backend with no
+    # Gitea credentials, which no amount of reloading will fix, and a
+    # bootstrap that simply found no eligible org. Naming which one lets the
+    # frontend say so instead of rendering an unexplained blank table.
+    envelope["gitea_configured"] = bool(settings.gitea_url and settings.gitea_api_token)
+    # The most recent *completed* ISO week, which is the newest week the lazy
+    # fan-out can ask for: POST /projects/{id}/snapshots/at refuses the
+    # in-progress week, since weekly_snapshots is immutable and caching a
+    # partial week would freeze a wrong verdict for the rest of it.
+    envelope["lazy_week_start"] = current_week_start - timedelta(days=7)
+    return envelope
 
 
 @router.get("/portfolio/delivery")
@@ -353,8 +424,7 @@ async def portfolio_delivery(user: AuthUser = Depends(get_current_user)) -> dict
     UI can distinguish "no open pull requests" from "not synced yet".
     """
     database = _db()
-    all_projects = await database.list("projects")
-    ids = set(visible_project_ids(user, [project.project_id for project in all_projects]))
+    ids = set(await _visible_project_ids(database, user))
 
     latest_by_repo: dict[str, Any] = {}
     for row in await database.list("repo_activity"):
@@ -411,8 +481,7 @@ async def snapshot_at_date(
     database = _db()
     week_start = on - timedelta(days=on.weekday())
     week_end = week_start + timedelta(days=6)
-    all_projects = await database.list("projects")
-    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    ids = await _visible_project_ids(database, user)
     by_project: dict[str, WeeklySnapshotDocument] = {}
     for row in await database.list("snapshots"):
         if row.week_start != week_start:
@@ -604,8 +673,7 @@ async def progress_at_date(
     """
     database = _db()
     as_of_week_start = on - timedelta(days=on.weekday())
-    all_projects = await database.list("projects")
-    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    ids = await _visible_project_ids(database, user)
     by_project: dict[str, CumulativeCheckpointDocument] = {}
     for row in await database.list("cumulative_checkpoints"):
         if row.as_of_week_start != as_of_week_start or row.signal_version != CUMULATIVE_VERSION:

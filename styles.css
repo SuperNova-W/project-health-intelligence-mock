@@ -342,6 +342,14 @@ button { border: 0; cursor: pointer; }
 .queue-action.compute-week-retry, .queue-action.progress-retry { color: var(--clay); }
 .spinner { width: var(--sp-5); height: var(--sp-5); border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--ink-soft); animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Placeholder row in the Projects/Insights tables for a project whose weekly
+   snapshot has not been computed yet. It holds the row's full height so the
+   table does not jump as rows fill in behind the reader's scroll. */
+.lazy-row td { color: var(--ink-faint); }
+.lazy-note { display: inline-flex; align-items: center; gap: var(--sp-3); color: var(--ink-faint); font-size: var(--fs-xs); }
+.lazy-retry { color: var(--clay); background: transparent; font-size: var(--fs-xs); font-weight: 600; font-family: var(--font-mono); border-bottom: 1px solid var(--line-strong); }
+.lazy-retry:hover { border-color: var(--clay); }
 /* Trajectory accents, for the one place trajectory now appears: a labelled row
    beside Work to date and Confidence in the checkpoint detail. It is a plain
    metric value rather than a pill -- a pill would have been the odd one out

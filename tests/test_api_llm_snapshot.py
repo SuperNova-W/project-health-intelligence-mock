@@ -111,3 +111,79 @@ async def test_post_snapshot_at_computes_and_returns_result(client_over_store, m
     body = response.json()
     assert body["computed"] is True
     assert body["cached"] is False
+
+
+# ---------------------------------------------------------------------
+# GET /snapshots/latest -- the lazy-compute contract the live dashboard
+# reads. The frontend fans out one POST per id in missing_project_ids, but
+# only once that project's row scrolls into view.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_latest_lists_projects_with_no_snapshot_as_missing(client_over_store, make_project, make_boundary) -> None:
+    client, store = client_over_store
+    await store.add("projects", make_project())
+    await store.add("boundaries", make_boundary())
+
+    body = (await client.get("/snapshots/latest")).json()
+
+    assert body["missing_project_ids"] == ["member-portal"]
+    # The project still renders a row -- the frontend needs its name and team
+    # to draw the placeholder it will later fill in.
+    assert [item["id"] for item in body["projects"]] == ["member-portal"]
+
+
+@pytest.mark.asyncio
+async def test_latest_omits_projects_that_already_have_a_snapshot(client_over_store, make_project, make_boundary, make_snapshot) -> None:
+    client, store = client_over_store
+    await store.add("projects", make_project())
+    await store.add("boundaries", make_boundary())
+    await store.add("snapshots", make_snapshot(week_start=PAST_WEEK_MONDAY))
+
+    body = (await client.get("/snapshots/latest")).json()
+
+    assert body["missing_project_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_latest_lazy_week_is_the_last_completed_week(client_over_store, make_project, make_boundary) -> None:
+    """The week the frontend posts for must be one the POST route accepts.
+
+    ``POST /projects/{id}/snapshots/at`` refuses the in-progress week, so a
+    lazy_week_start inside the current week would make every fan-out 400.
+    """
+    client, store = client_over_store
+    await store.add("projects", make_project())
+    await store.add("boundaries", make_boundary())
+
+    body = (await client.get("/snapshots/latest")).json()
+
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    lazy_week_start = date.fromisoformat(body["lazy_week_start"])
+    assert lazy_week_start == current_week_start - timedelta(days=7)
+    assert lazy_week_start < current_week_start
+    # Same guard the POST route applies, asserted directly.
+    assert lazy_week_start - timedelta(days=lazy_week_start.weekday()) == lazy_week_start
+
+
+@pytest.mark.asyncio
+async def test_latest_reports_computable_from_llm_configuration(client_over_store, make_project, make_boundary, monkeypatch) -> None:
+    client, store = client_over_store
+    await store.add("projects", make_project())
+    await store.add("boundaries", make_boundary())
+
+    assert (await client.get("/snapshots/latest")).json()["computable"] is False
+
+    import backend.config as config_module
+    config_module.get_settings.cache_clear()
+    monkeypatch.setenv("PHI_LLM_ENABLED", "true")
+    monkeypatch.setenv("PHI_OPENAI_API_KEY", "test-key")
+    config_module.get_settings.cache_clear()
+    try:
+        body = (await client.get("/snapshots/latest")).json()
+    finally:
+        config_module.get_settings.cache_clear()
+
+    assert body["computable"] is True
