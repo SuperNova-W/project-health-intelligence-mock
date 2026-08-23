@@ -343,8 +343,13 @@ async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return {
         "status": "ok",
         "environment": settings.environment,
-        "database": "sqlite",
-        "sqlite_path": settings.sqlite_path,
+        "database": "postgres" if settings.uses_postgres else "sqlite",
+        # Only meaningful on SQLite. Kept reported either way so the field
+        # doesn't vanish from a response someone may already be checking.
+        "sqlite_path": None if settings.uses_postgres else settings.sqlite_path,
+        # Durability is the whole reason Postgres is here: on SQLite the file
+        # sits on the container filesystem and a deploy empties it.
+        "storage_is_durable": settings.uses_postgres,
         "directory_source": "people_portal" if settings.people_portal_url else "authentik" if settings.authentik_url else None,
         "people_portal_configured": bool(settings.people_portal_url),
         # Without both of these the cold-start bootstrap in

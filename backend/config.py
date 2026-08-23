@@ -51,6 +51,26 @@ class Settings(BaseSettings):
     )
     sqlite_busy_timeout_ms: int = Field(default=5_000, ge=250, le=120_000)
 
+    database_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PHI_DATABASE_URL", "DATABASE_URL"),
+        description=(
+            "Postgres DSN (e.g. Supabase). When set it takes precedence over "
+            "sqlite_path and the service uses Postgres for everything. Unset "
+            "keeps SQLite, which is what tests and local development use."
+        ),
+    )
+    # Deliberately small. Each pooled connection is a slot on Supabase's
+    # pooler and a few hundred KB in the container; a single-worker service
+    # serving a handful of concurrent reads does not need more.
+    postgres_pool_min_size: int = Field(default=1, ge=0, le=32)
+    postgres_pool_max_size: int = Field(default=5, ge=1, le=64)
+    postgres_command_timeout_s: float = Field(default=30.0, gt=0, le=300)
+
+    @property
+    def uses_postgres(self) -> bool:
+        return bool(self.database_url)
+
     aggregation_floor: int = Field(
         default=5,
         ge=1,

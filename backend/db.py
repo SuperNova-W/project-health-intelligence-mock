@@ -1,7 +1,18 @@
-"""SQLite-backed async repository replacing the former Beanie/Motor stack.
+"""SQLite-backed async repository, and the entry point that selects a backend.
 
-``:memory:`` is a fully supported path so the same code serves tests, local
-development, and production — no dual-mode branching.
+``init_db`` opens Postgres when ``Settings.database_url`` is set and SQLite
+otherwise. ``PostgresStore`` (in ``backend.db_postgres``) implements the same
+interface as ``SqliteStore``, so the choice is invisible past
+``get_active_repository()`` — the branch is here and nowhere else.
+
+SQLite remains the default and is what tests and local development run on;
+``:memory:`` is a fully supported path. Postgres exists because a deployed
+SQLite file sits on a container filesystem that a deploy discards.
+
+The storage-agnostic pieces — the collection/table/model registry, ``_encode``
+/ ``_decode``, and ``_extra_cols`` — live here and are imported by the
+Postgres store rather than duplicated, so the two cannot disagree about what
+a document looks like on disk.
 
 WAL journal mode and a generous busy-timeout let multiple readers coexist with
 the nightly writer without contention errors.
@@ -513,22 +524,48 @@ async def _apply_schema(db: aiosqlite.Connection, busy_timeout_ms: int = 5_000) 
 @dataclass
 class DatabaseState:
     settings: Settings
-    connection: aiosqlite.Connection
-    store: SqliteStore
+    store: Any
+    # Exactly one of these is set. SQLite holds a single connection; Postgres
+    # holds an asyncpg pool. Both are closed through close_db().
+    connection: aiosqlite.Connection | None = None
+    pool: Any = None
+
+    @property
+    def backend(self) -> str:
+        return "postgres" if self.pool is not None else "sqlite"
 
     @property
     def in_memory(self) -> bool:
-        return self.settings.sqlite_path == ":memory:"
+        return self.pool is None and self.settings.sqlite_path == ":memory:"
 
 
 _database_state: DatabaseState | None = None
 
 
-async def init_db(settings: Settings | None = None) -> SqliteStore:
-    """Open the SQLite connection, apply WAL mode, and create the schema."""
+async def init_db(settings: Settings | None = None) -> Any:
+    """Open the database and create the schema.
+
+    Postgres when ``database_url`` is set, SQLite otherwise. The two stores
+    implement the same interface, so nothing downstream of
+    ``get_active_repository()`` branches on which one is live.
+    """
     global _database_state
 
     resolved = settings or get_settings()
+
+    if resolved.uses_postgres:
+        from .db_postgres import PostgresStore, create_pool
+
+        pool = await create_pool(
+            resolved.database_url or "",
+            min_size=resolved.postgres_pool_min_size,
+            max_size=resolved.postgres_pool_max_size,
+            timeout=resolved.postgres_command_timeout_s,
+        )
+        store = PostgresStore(pool)
+        _database_state = DatabaseState(settings=resolved, store=store, pool=pool)
+        return store
+
     path = resolved.sqlite_path
 
     # Create the parent directory for file-based databases.
@@ -541,16 +578,20 @@ async def init_db(settings: Settings | None = None) -> SqliteStore:
     await _apply_schema(db, resolved.sqlite_busy_timeout_ms)
 
     store = SqliteStore(db)
-    _database_state = DatabaseState(settings=resolved, connection=db, store=store)
+    _database_state = DatabaseState(settings=resolved, store=store, connection=db)
     return store
 
 
 async def close_db() -> None:
-    """Close the SQLite connection and reset module state."""
+    """Close the connection or pool and reset module state."""
     global _database_state
-    if _database_state is not None:
+    if _database_state is None:
+        return
+    if _database_state.pool is not None:
+        await _database_state.pool.close()
+    elif _database_state.connection is not None:
         await _database_state.connection.close()
-        _database_state = None
+    _database_state = None
 
 
 def get_db_state() -> DatabaseState:
@@ -560,6 +601,9 @@ def get_db_state() -> DatabaseState:
     return _database_state
 
 
-def get_active_repository() -> SqliteStore:
-    """Return the initialized SQLite store (previously selected in/memory vs Mongo)."""
+def get_active_repository() -> Any:
+    """Return the initialised store — ``SqliteStore`` or ``PostgresStore``.
+
+    Both implement the same interface, so callers never branch on which.
+    """
     return get_db_state().store

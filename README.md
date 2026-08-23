@@ -34,11 +34,60 @@ The API reads no cookies; it authenticates with an Authentik OIDC bearer token. 
 
 The frontend sends it as `Authorization: Bearer <token>` and leaves the header off entirely when no token is configured. Obtaining and refreshing the token is the host page's responsibility — this mock deliberately implements no OIDC redirect flow of its own.
 
+## Database: SQLite by default, Postgres when `PHI_DATABASE_URL` is set
+
+Set `PHI_DATABASE_URL` (or `DATABASE_URL`) to a Postgres DSN and the service
+uses Postgres for everything; leave it unset and it uses SQLite at
+`PHI_SQLITE_PATH`. Tests and local development use SQLite, so nothing has to
+be running to work on this. `GET /health` reports `database` and
+`storage_is_durable` so you can tell which is live from outside the container.
+
+`PostgresStore` and `SqliteStore` implement the same interface, and
+`tests/test_postgres_store.py` runs one body of assertions against **both** so
+they cannot drift. To run the Postgres half:
+
+```sh
+docker run -d --rm --name phi-pg-test -e POSTGRES_PASSWORD=testpw \
+    -e POSTGRES_DB=phitest -p 55432:5432 postgres:15-alpine
+PHI_TEST_POSTGRES_DSN=postgresql://postgres:testpw@127.0.0.1:55432/phitest \
+    python -m pytest tests/test_postgres_store.py
+```
+
+Without that variable those tests skip and the rest of the suite is unchanged.
+
+### Deploying against Supabase
+
+1. Install the extra: the image already does `pip install '.[llm,postgres]'`
+   (`asyncpg`). A plain `pip install .` will not have it.
+2. Take the DSN from **Project Settings → Database → Connection string →
+   URI**, and set it as `PHI_DATABASE_URL` on the Render service.
+3. **Use the connection-pooler host, not the direct one.** Supabase's direct
+   `db.<ref>.supabase.co` host resolves to IPv6 only, and Render's outbound
+   traffic is IPv4 — a direct DSN fails to connect with a network-unreachable
+   error that looks nothing like a config problem. The pooler host
+   (`*.pooler.supabase.com`) is dual-stack.
+4. Nothing else to configure: the schema is created on first boot, and
+   `looks_like_pooled_dsn` detects a transaction-mode pooler (port 6543, or a
+   `pooler.` host) and disables asyncpg's prepared-statement cache, which is
+   otherwise unsafe when the pooler reassigns backends between statements.
+
+Pool sizing defaults to 1–5 connections (`PHI_POSTGRES_POOL_MIN_SIZE` /
+`PHI_POSTGRES_POOL_MAX_SIZE`), deliberately small: each connection is a slot
+on the pooler and memory in a container that has little to spare.
+
+The schema is a faithful translation of the SQLite one — `id` + indexed
+columns + a document blob, dates kept as ISO **TEXT** so ordering keeps its
+meaning, and the blob as **JSONB**. The snapshot immutability triggers become
+one plpgsql function; `clear()` uses `TRUNCATE`, which does not fire
+row-level DELETE triggers, so the guard survives it.
+
 ## Cold start: nothing has to be backfilled
 
-The deployed SQLite file lives on the container filesystem, so a Render deploy
-starts with an empty database. Nothing below has to be run by hand to recover
-from that — the dashboard fills itself in, in two lazy stages:
+On Postgres this section is mostly moot — the data survives a deploy, so the
+bootstrap runs once and never again. It still matters on SQLite, where the
+file lives on the container filesystem and every deploy starts empty. Either
+way, nothing below has to be run by hand: the dashboard fills itself in, in
+two lazy stages:
 
 1. **Project registry.** The first user-facing read that finds the projects
    collection empty registers one project + boundary per Gitea org the token
