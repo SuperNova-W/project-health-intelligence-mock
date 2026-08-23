@@ -15,7 +15,6 @@ org.
 
 from __future__ import annotations
 
-import re
 from datetime import date
 from typing import Any
 
@@ -23,9 +22,8 @@ from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from .config import get_settings
 from .db import get_active_repository
-from .ingestion import discover_gitea_orgs
+from .discovery import GiteaUnavailable, discover_and_register_projects, reset_bootstrap_state
 from .jobs import run_nightly_sync, run_weekly_backfill, run_weekly_snapshot_job
-from .models import BoundaryDocument, LifecycleState, ProjectDocument, RepositoryRef, utc_now
 
 router = APIRouter(prefix="/admin/sync", tags=["admin"])
 
@@ -109,12 +107,10 @@ async def trigger_reset(
             detail="pass ?confirm=erase-all-data to proceed",
         )
     await get_active_repository().clear()
+    # The collection is empty again, so the next user-facing read should be
+    # allowed to bootstrap it rather than sit out a stale cooldown.
+    reset_bootstrap_state()
     return {"status": "reset"}
-
-
-def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "org"
 
 
 @router.post("/discover-projects")
@@ -134,87 +130,28 @@ async def trigger_discover_projects(
 
     Safe to re-run: an org with no repos is skipped, and a boundary is only
     re-versioned when its repo set actually changed since the last run.
+
+    The same work also happens on its own, un-gated, the first time a
+    user-facing read finds the projects collection empty -- see
+    ``backend.discovery.ensure_projects_registered``. This route stays for
+    picking up newly created orgs on a database that already has projects in
+    it, which the empty-only bootstrap deliberately will not do.
     """
     _check_token(x_admin_sync_token)
-    settings = get_settings()
-    if not settings.gitea_url or not settings.gitea_api_token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="PHI_GITEA_URL and PHI_GITEA_API_TOKEN must both be set",
-        )
     try:
-        discovered = discover_gitea_orgs(base_url=settings.gitea_url, token=settings.gitea_api_token)
-    except Exception as exc:
+        result = await discover_and_register_projects(
+            settings=get_settings(),
+            database=get_active_repository(),
+        )
+    except GiteaUnavailable as exc:
+        configured = get_settings().gitea_url and get_settings().gitea_api_token
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"could not list Gitea orgs: {exc}",
+            status_code=status.HTTP_502_BAD_GATEWAY if configured else status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
         ) from exc
-
-    database = get_active_repository()
-    today = date.today()
-    # A boundary only maps repos to a project from its effective_from date
-    # onward, so a boundary dated "today" would be invisible to every
-    # backfilled week before today and every one of those weeks' activity
-    # would fold as unmapped. Backdating well before any club org could have
-    # existed keeps the boundary effective for the org's whole real history.
-    effective_from = date(2020, 1, 1)
-    created_projects: list[str] = []
-    updated_boundaries: list[str] = []
-    skipped: list[str] = []
-    seen_slugs: set[str] = set()
-
-    for entry in discovered:
-        org_name = entry["org"]
-        repos = [repo for repo in entry["repos"] if repo.get("id") is not None and repo.get("name")]
-        if not repos:
-            skipped.append(org_name)
-            continue
-        slug = _slugify(org_name)
-        if slug in seen_slugs:
-            skipped.append(org_name)
-            continue
-        seen_slugs.add(slug)
-
-        primary_repos = [
-            RepositoryRef(gitea_repo_id=str(repo["id"]), repo_slug=str(repo["name"]))
-            for repo in repos
-        ]
-
-        if await database.get_project(slug) is None:
-            await database.add(
-                "projects",
-                ProjectDocument(
-                    project_id=slug,
-                    display_name=org_name,
-                    lifecycle_state=LifecycleState.ACTIVE,
-                    non_goals_ack=True,
-                ),
-            )
-            created_projects.append(slug)
-
-        current = await database.boundary_at(slug, at=today)
-        current_repo_ids = {ref.gitea_repo_id for ref in current.primary_repos} if current else None
-        new_repo_ids = {ref.gitea_repo_id for ref in primary_repos}
-        if current_repo_ids != new_repo_ids:
-            await database.add(
-                "boundaries",
-                BoundaryDocument(
-                    project_id=slug,
-                    root_authentik_team_id=org_name,
-                    primary_repos=primary_repos,
-                    effective_from=effective_from,
-                    created_by="admin-discover",
-                    created_at=utc_now(),
-                ),
-            )
-            updated_boundaries.append(slug)
-
-    return {
-        "orgs_seen": len(discovered),
-        "projects_created": created_projects,
-        "boundaries_updated": updated_boundaries,
-        "skipped_orgs": skipped,
-    }
+    # A successful manual discovery makes any earlier bootstrap failure stale.
+    reset_bootstrap_state()
+    return result
 
 
 @router.get("/diagnostics/gitea-diff")

@@ -34,6 +34,33 @@ The API reads no cookies; it authenticates with an Authentik OIDC bearer token. 
 
 The frontend sends it as `Authorization: Bearer <token>` and leaves the header off entirely when no token is configured. Obtaining and refreshing the token is the host page's responsibility — this mock deliberately implements no OIDC redirect flow of its own.
 
+## Cold start: nothing has to be backfilled
+
+The deployed SQLite file lives on the container filesystem, so a Render deploy
+starts with an empty database. Nothing below has to be run by hand to recover
+from that — the dashboard fills itself in, in two lazy stages:
+
+1. **Project registry.** The first user-facing read that finds the projects
+   collection empty registers one project + boundary per Gitea org the token
+   can see (`backend/discovery.py`). It runs only when the collection is
+   empty, is single-flighted so a burst of cold requests lists the orgs once,
+   and backs off for five minutes after an attempt that registered nothing so
+   a bad `PHI_GITEA_URL` doesn't tax every page load. A failure logs and still
+   serves the (empty) envelope — a read endpoint never 5xxs over it.
+2. **Per-project signals.** Those rows come back from `/snapshots/latest` in
+   `missing_project_ids`, and the frontend computes them one at a time as each
+   row scrolls into view. A cold database therefore costs one LLM request per
+   project actually looked at, not one per project in the portfolio.
+
+This needs `PHI_GITEA_URL` and `PHI_GITEA_API_TOKEN` on the API service;
+`GET /health` reports `gitea_configured` and `llm_configured` so that can be
+checked from outside the container, and an empty dashboard says which of the
+two is missing rather than rendering a blank table.
+
+What lazy compute does **not** recover is `open_prs`, review latency and the
+8-week series: those fold from `repo_activity` rows only the sync jobs below
+write, and render as "--" until one has run.
+
 ## Admin sync endpoints (single-process hosts like Render)
 
 `scripts/run_jobs.py` needs a second process sharing the SQLite file, which a
@@ -50,7 +77,10 @@ every route requires an `X-Admin-Sync-Token` header matching
   its current repos, so `nightly`/`backfill` below know what to pull. Safe to
   re-run as new orgs/repos appear; only re-versions a boundary when its repo
   set actually changed. Set `PHI_GITEA_ORG` instead to pin the deployment to
-  a single, explicit org and skip discovery entirely.
+  a single, explicit org and skip discovery entirely. Not needed on a cold
+  database — the same work happens on the first read, un-gated (see above).
+  This route is for picking up newly created orgs on a database that already
+  has projects in it, which the empty-only bootstrap deliberately will not do.
 - `POST /admin/sync/reset?confirm=erase-all-data` — wipes every row in every
   collection, including immutable weekly snapshots. Irreversible; meant as a
   one-time step to clear the bundled demo fixtures before pointing the

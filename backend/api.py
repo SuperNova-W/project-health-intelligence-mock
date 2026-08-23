@@ -26,6 +26,7 @@ from .config import Settings, get_settings
 from .cumulative_llm import CUMULATIVE_VERSION
 from .llm import OpenAIStructuredLLM, LLMUnavailable
 from .db import get_active_repository
+from .discovery import ensure_projects_registered
 from .jobs import generate_cumulative_checkpoint, generate_llm_snapshot, get_signal_judge
 from .signal_llm import SIGNAL_VERSION
 from .models import (
@@ -53,6 +54,22 @@ router = APIRouter()
 
 def _db() -> Any:
     return get_active_repository()
+
+
+async def _visible_project_ids(database: Any, user: AuthUser) -> list[str]:
+    """Every project id ``user`` may see, bootstrapping a cold registry first.
+
+    ``ensure_projects_registered`` is a no-op the moment any project exists,
+    so this is one extra collection read on a warm database. On an empty one
+    -- a fresh deploy, or a host whose disk does not survive one -- it
+    registers a project per Gitea org before the listing, which is what turns
+    the whole lazy path on: the rows have to exist before ``/snapshots/latest``
+    can name them missing and the frontend can fill them in as they scroll
+    into view. It never pulls history; that stays lazy and per project.
+    """
+    await ensure_projects_registered(settings=get_settings(), database=database)
+    projects = await database.list("projects")
+    return visible_project_ids(user, [project.project_id for project in projects])
 
 
 class FeedbackRequest(BaseModel):
@@ -330,6 +347,12 @@ async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "sqlite_path": settings.sqlite_path,
         "directory_source": "people_portal" if settings.people_portal_url else "authentik" if settings.authentik_url else None,
         "people_portal_configured": bool(settings.people_portal_url),
+        # Without both of these the cold-start bootstrap in
+        # backend.discovery cannot register any project, and the dashboard
+        # stays empty however many times it is reloaded -- worth being able
+        # to check from outside the container.
+        "gitea_configured": bool(settings.gitea_url and settings.gitea_api_token),
+        "llm_configured": bool(settings.llm_active),
         "outbound_notifications": False,
     }
 
@@ -345,10 +368,14 @@ async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[st
     what lets a database with no ingested history (a fresh deploy, or a host
     whose disk does not survive one) render real signals without a sync job
     having run first.
+
+    Cache-only covers the *snapshots*. The project registry underneath them
+    is not cache-only: ``_visible_project_ids`` registers a project per Gitea
+    org the first time it finds the collection empty, because rows have to
+    exist before any of the above can name them missing.
     """
     database = _db()
-    all_projects = await database.list("projects")
-    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    ids = await _visible_project_ids(database, user)
     items: list[dict[str, Any]] = []
     snapshots: list[WeeklySnapshotDocument] = []
     missing: list[str] = []
@@ -369,6 +396,11 @@ async def latest_snapshot(user: AuthUser = Depends(get_current_user)) -> dict[st
     current_week_start = today - timedelta(days=today.weekday())
     envelope["missing_project_ids"] = missing
     envelope["computable"] = bool(settings.llm_active)
+    # An empty portfolio has two very different causes -- a backend with no
+    # Gitea credentials, which no amount of reloading will fix, and a
+    # bootstrap that simply found no eligible org. Naming which one lets the
+    # frontend say so instead of rendering an unexplained blank table.
+    envelope["gitea_configured"] = bool(settings.gitea_url and settings.gitea_api_token)
     # The most recent *completed* ISO week, which is the newest week the lazy
     # fan-out can ask for: POST /projects/{id}/snapshots/at refuses the
     # in-progress week, since weekly_snapshots is immutable and caching a
@@ -392,8 +424,7 @@ async def portfolio_delivery(user: AuthUser = Depends(get_current_user)) -> dict
     UI can distinguish "no open pull requests" from "not synced yet".
     """
     database = _db()
-    all_projects = await database.list("projects")
-    ids = set(visible_project_ids(user, [project.project_id for project in all_projects]))
+    ids = set(await _visible_project_ids(database, user))
 
     latest_by_repo: dict[str, Any] = {}
     for row in await database.list("repo_activity"):
@@ -450,8 +481,7 @@ async def snapshot_at_date(
     database = _db()
     week_start = on - timedelta(days=on.weekday())
     week_end = week_start + timedelta(days=6)
-    all_projects = await database.list("projects")
-    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    ids = await _visible_project_ids(database, user)
     by_project: dict[str, WeeklySnapshotDocument] = {}
     for row in await database.list("snapshots"):
         if row.week_start != week_start:
@@ -643,8 +673,7 @@ async def progress_at_date(
     """
     database = _db()
     as_of_week_start = on - timedelta(days=on.weekday())
-    all_projects = await database.list("projects")
-    ids = visible_project_ids(user, [project.project_id for project in all_projects])
+    ids = await _visible_project_ids(database, user)
     by_project: dict[str, CumulativeCheckpointDocument] = {}
     for row in await database.list("cumulative_checkpoints"):
         if row.as_of_week_start != as_of_week_start or row.signal_version != CUMULATIVE_VERSION:

@@ -101,6 +101,9 @@ const state = {
   lazyMissing: new Set(),
   lazyComputing: new Set(),
   lazyErrors: {},
+  // Reported by GET /snapshots/latest. Assume true until told otherwise, so
+  // an older backend without the field is not accused of being misconfigured.
+  giteaConfigured: true,
 };
 
 let currentView = 'overview';
@@ -805,6 +808,18 @@ function calendarPanelMarkup() {
   return `<section class="panel calendar-panel"><div class="panel-header"><div><h2 class="panel-title">Portfolio as of ${escapeHtml(formatDate(state.calendarDate))}</h2><p class="panel-subtitle">${weekLabel ? `Week of ${escapeHtml(weekLabel)} · the verdict as it was judged that week, not re-scored against today's rules.` : 'No snapshot has been computed for this week.'}</p></div></div><div class="queue-list">${items.length ? items.map(rowMarkup).join('') : '<div class="history-empty" style="padding:20px;">No projects to show.</div>'}</div></section>`;
 }
 
+// An empty portfolio used to render as an unexplained blank table, which is
+// indistinguishable from a broken API base or a CORS failure. The backend now
+// registers a project per Gitea org on the first cold read, so an empty result
+// means one of two specific things -- say which.
+function emptyPortfolioMarkup(overrideMessage = null) {
+  if (overrideMessage) return `<div class="history-empty">${escapeHtml(overrideMessage)}</div>`;
+  const message = state.giteaConfigured
+    ? 'No projects registered yet. The backend registers one per Gitea organisation the first time this page loads — if this persists, its Gitea token cannot see any organisation with repositories in it.'
+    : 'No projects registered. The backend has no Gitea credentials, so it cannot discover any: set PHI_GITEA_URL and PHI_GITEA_API_TOKEN on the API service and redeploy. Its /health endpoint reports gitea_configured.';
+  return `<div class="history-empty">${escapeHtml(message)}</div>`;
+}
+
 function renderOverview() {
   const projects = state.projects;
   const attention = projects.filter(isAttentionProject);
@@ -812,7 +827,8 @@ function renderOverview() {
   const insufficient = projects.filter((project) => project.statusClass === 'data');
   const active = projects.filter(isActiveProject);
   return `<div class="page-heading"><div><span class="eyebrow">Weekly portfolio review</span><h1>Good morning</h1></div><div class="heading-actions"><div class="date-chip">${icon('calendar')} ${escapeHtml(snapshotMetaFor().snapshotWeekStart ? `${formatDate(snapshotMetaFor().snapshotWeekStart)}${snapshotMetaFor().snapshotWeekEnd ? ` – ${formatDate(snapshotMetaFor().snapshotWeekEnd)}` : ''}` : 'Current snapshot')}</div>${calendarControlMarkup()}</div></div>
-    ${statGridMarkup(active, attention, clear, insufficient)}`;
+    ${statGridMarkup(active, attention, clear, insufficient)}
+    ${projects.length ? '' : `<section class="panel"><div class="panel-body" style="padding:20px;">${emptyPortfolioMarkup()}</div></section>`}`;
 }
 
 // A stat card that is not a filter: the delivery figures describe the whole
@@ -866,7 +882,7 @@ function renderProjects() {
       // holds steady as rows fill in.
       if (lazyRowState(project.id)) return `<tr class="project-row lazy-row" data-project-id="${escapeHtml(project.id)}"${lazyRowAttrs(project.id)}>${identityCell}${lazyCellMarkup(project.id, 4)}</tr>`;
       return `<tr class="project-row" data-project-id="${escapeHtml(project.id)}">${identityCell}<td>${statusPill(project)}</td><td>${escapeHtml(project.signal)}</td><td><span class="freshness">${escapeHtml(project.lastActivity)}</span></td><td><span class="freshness">${escapeHtml(formatPercent(project.dataCompletenessPct))}</span></td></tr>`;
-    }).join('') : '<tr><td colspan="5"><div class="history-empty">No projects returned for this view.</div></td></tr>'}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
+    }).join('') : `<tr><td colspan="5">${emptyPortfolioMarkup(state.projects.length ? 'No projects match this filter.' : null)}</td></tr>`}</tbody></table></div><div class="table-footer"><span>Ownership metadata is included in each project profile.</span></div></section>`;
 }
 
 function insightsProjectCell(project) {
@@ -995,6 +1011,9 @@ async function loadLatestSnapshot() {
     state.lazyMissing = new Set(asArray(raw?.missing_project_ids));
     state.lazyComputing = new Set();
     state.lazyErrors = {};
+    // Only meaningful when the portfolio came back empty: it separates "the
+    // backend has no Gitea credentials" from "nothing to show yet".
+    state.giteaConfigured = raw?.gitea_configured !== false;
     state.loading = false;
     if (!selectedProjectId && state.projects[0]) selectedProjectId = state.projects[0].id;
     render();
