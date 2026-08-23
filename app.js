@@ -1049,14 +1049,57 @@ async function loadPortfolioDelivery() {
 const LAZY_ROOT_MARGIN = '200px';
 let lazyObserver = null;
 
+// How many viewport-triggered computes may be in flight at once. The
+// date-picker fan-out below has always been bounded (PROGRESS_FAN_OUT_
+// CONCURRENCY); this path was not, and that asymmetry is a memory bug rather
+// than a style one. The observer fires per *intersecting* row, and with a
+// 200px rootMargin a normal viewport has ten to fifteen table rows
+// intersecting on first paint -- each one a POST that costs the API a
+// multi-repo commit-diff pull plus an LLM call. Ten of those concurrently is
+// enough to exhaust a small container. Two at a time still keeps ahead of
+// someone scrolling.
+const LAZY_COMPUTE_CONCURRENCY = 2;
+const lazyQueue = [];
+// Rows accepted into the queue but not yet finished. render(true) rebuilds
+// the observer on every repaint and a still-'pending' queued row gets
+// re-observed, so without this a row waiting its turn would be enqueued once
+// per repaint.
+const lazyQueued = new Set();
+let lazyActive = 0;
+
+function pumpLazyQueue() {
+  while (lazyActive < LAZY_COMPUTE_CONCURRENCY && lazyQueue.length) {
+    const { key, run } = lazyQueue.shift();
+    lazyActive += 1;
+    // run() already funnels its own failures into state.lazyErrors; the catch
+    // here is only so a throw cannot strand the slot and stall the queue.
+    Promise.resolve()
+      .then(run)
+      .catch(() => {})
+      .finally(() => {
+        lazyActive -= 1;
+        lazyQueued.delete(key);
+        pumpLazyQueue();
+      });
+  }
+}
+
 // Which of the two lazy surfaces a row belongs to. They write to different
 // state (state.projects vs. state.calendarResult.projects) and post to a
 // different week, so the row carries its channel rather than the observer
 // guessing from the current view.
 function lazyComputeFor(kind, projectId) {
   if (!projectId) return;
-  if (kind === 'calendar') computeCalendarProjectSnapshot(projectId);
-  else computeLatestProjectSnapshot(projectId);
+  const key = `${kind === 'calendar' ? 'calendar' : 'latest'}:${projectId}`;
+  if (lazyQueued.has(key)) return;
+  lazyQueued.add(key);
+  lazyQueue.push({
+    key,
+    run: () => (kind === 'calendar'
+      ? computeCalendarProjectSnapshot(projectId)
+      : computeLatestProjectSnapshot(projectId)),
+  });
+  pumpLazyQueue();
 }
 
 function bindLazyCompute() {
@@ -1847,13 +1890,13 @@ function bindViewEvents() {
   document.querySelectorAll('.lazy-retry').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
     const projectId = button.dataset.projectId;
-    if (button.dataset.lazyKind === 'calendar') {
-      delete state.calendarComputeErrors[projectId];
-      computeCalendarProjectSnapshot(projectId);
-    } else {
-      delete state.lazyErrors[projectId];
-      computeLatestProjectSnapshot(projectId);
-    }
+    const kind = button.dataset.lazyKind === 'calendar' ? 'calendar' : 'latest';
+    if (kind === 'calendar') delete state.calendarComputeErrors[projectId];
+    else delete state.lazyErrors[projectId];
+    // Through the queue, not straight to the compute function: retry is a
+    // click, and a reviewer clicking down a column of failed rows would
+    // otherwise put the whole column in flight at once and bypass the cap.
+    lazyComputeFor(kind, projectId);
   }));
   document.getElementById('progress-date-input')?.addEventListener('change', (event) => {
     if (event.target.value) goto({ view: 'projects', filter: currentFilter, asOf: event.target.value });

@@ -407,6 +407,18 @@ class SqliteStore:
     # Optimised lookup methods (use indexed WHERE clauses)
     # ------------------------------------------------------------------
 
+    async def has_any(self, collection: str) -> bool:
+        """Whether a collection holds at least one row.
+
+        ``list(collection)`` would answer this too, but it selects every row
+        and decodes each into a Pydantic model to evaluate a boolean. The
+        cold-start bootstrap asks this on every request, so it gets a query
+        that stops at the first row.
+        """
+        table = _TABLE_MAP[_logical(collection)]
+        async with self._db.execute(f"SELECT 1 FROM {table} LIMIT 1") as cursor:
+            return await cursor.fetchone() is not None
+
     async def get_project(self, project_id: str) -> ProjectDocument | None:
         async with self._db.execute(
             "SELECT data FROM projects WHERE project_id = ?", (project_id,)

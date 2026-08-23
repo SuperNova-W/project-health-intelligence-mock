@@ -170,15 +170,24 @@ class _BootstrapGate:
             and (time.monotonic() - self._last_attempt) < BOOTSTRAP_RETRY_SECONDS
         )
 
+    @staticmethod
+    async def _has_projects(database: Any) -> bool:
+        # SqliteStore answers this with a LIMIT 1 query; the fallback is for
+        # stores that only implement the generic collection interface.
+        has_any = getattr(database, "has_any", None)
+        if has_any is not None:
+            return await has_any("projects")
+        return bool(await database.list("projects"))
+
     async def run(self, *, settings: Settings, database: Any) -> dict[str, Any] | None:
         if not settings.gitea_url or not settings.gitea_api_token:
             return None
-        if await database.list("projects") or self._cooling_down():
+        if await self._has_projects(database) or self._cooling_down():
             return None
         async with self._lock:
             # Re-check inside the lock: whoever held it may have just filled
             # the collection while this request was queued behind them.
-            if await database.list("projects") or self._cooling_down():
+            if await self._has_projects(database) or self._cooling_down():
                 return None
             self._last_attempt = time.monotonic()
             try:

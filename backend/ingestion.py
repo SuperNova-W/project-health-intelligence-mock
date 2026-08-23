@@ -385,12 +385,54 @@ class _HttpxAdapter:
             raiser()
         return response.json(), getattr(response, "headers", None)
 
-    def get_text(self, path_or_url: str, params: Mapping[str, Any] | None = None) -> str:
-        response = self._get_client().get(self._url(path_or_url), params=dict(params or {}))
-        raiser = getattr(response, "raise_for_status", None)
-        if raiser is not None:
-            raiser()
-        return response.text
+    def get_text(
+        self,
+        path_or_url: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        max_bytes: int | None = None,
+    ) -> str:
+        """Fetch a text body, optionally refusing to buffer more than ``max_bytes``.
+
+        The caller for this is the raw commit-diff read, whose response size
+        is set by whatever happened to be committed: one vendored directory
+        or regenerated lockfile is tens of megabytes. ``response.text``
+        materialises all of it, and the per-commit byte caps in
+        ``code_evidence`` only apply *after* that string exists -- so they
+        bound the prompt, not the process. Streaming and stopping at the cap
+        is what actually bounds peak memory.
+        """
+        url = self._url(path_or_url)
+        query = dict(params or {})
+        client = self._get_client()
+
+        streamer = getattr(client, "stream", None) if max_bytes is not None else None
+        if streamer is None:
+            # No cap asked for, or a client (test double) that cannot stream.
+            response = client.get(url, params=query)
+            raiser = getattr(response, "raise_for_status", None)
+            if raiser is not None:
+                raiser()
+            text = response.text
+            if max_bytes is not None and len(text.encode("utf-8")) > max_bytes:
+                return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+            return text
+
+        chunks: list[bytes] = []
+        total = 0
+        with streamer("GET", url, params=query) as response:
+            raiser = getattr(response, "raise_for_status", None)
+            if raiser is not None:
+                raiser()
+            for chunk in response.iter_bytes():
+                chunks.append(chunk)
+                total += len(chunk)
+                if total >= max_bytes:
+                    # Stop pulling: the rest of this diff cannot influence the
+                    # prompt, and reading it only to discard it is the whole
+                    # problem being fixed here.
+                    break
+        return b"".join(chunks)[:max_bytes].decode("utf-8", errors="ignore")
 
     def pages(
         self,

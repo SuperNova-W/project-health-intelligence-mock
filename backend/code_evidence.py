@@ -66,6 +66,15 @@ class DiffLimits:
     max_commits_total: int = 30
     max_bytes_per_commit: int = 20_000
     max_total_diff_bytes: int = 60_000
+    # Ceiling on the *raw* diff pulled off the wire, before noise filtering
+    # and the per-commit cap above run. Those two bound the prompt; this one
+    # bounds the process, which is a different problem: a commit that
+    # regenerates a lockfile or vendors a dependency is tens of megabytes of
+    # response body, and buffering it only to throw ~99% of it away is enough
+    # to OOM a small container. Deliberately generous relative to
+    # max_bytes_per_commit so that noise filtering still sees a realistic
+    # commit whole and the cap only bites on the pathological ones.
+    max_raw_diff_bytes: int = 400_000
     max_hunks_per_file: int = 6
     max_files_per_commit: int = 20
     # Tier-1 (metadata-only) threshold: at or under all three -> no diff fetch at all.
@@ -337,7 +346,10 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
 
     def commit_diff(self, repo_slug: str, sha: str) -> str | None:
         try:
-            return self.get_text(self._repo_path(repo_slug, f"git/commits/{quote(sha, safe='')}.diff"))
+            return self.get_text(
+                self._repo_path(repo_slug, f"git/commits/{quote(sha, safe='')}.diff"),
+                max_bytes=self.limits.max_raw_diff_bytes,
+            )
         except Exception:
             return None
 
@@ -439,6 +451,12 @@ class GiteaCodeEvidenceReader(_HttpxAdapter):
                 repo_evidence.fetch_errors.append(f"{commit.sha}: diff fetch failed")
                 continue
             selected, notes = _select_and_truncate_diff(diff_text, limits=self.limits)
+            if len(diff_text.encode("utf-8")) >= self.limits.max_raw_diff_bytes:
+                # The reviewer needs to know this commit was judged on a
+                # prefix of itself, not on the whole thing.
+                notes.append(
+                    f"{commit.sha[:8]}: raw diff exceeded the fetch ceiling and was read only up to it"
+                )
             selected_bytes = len(selected.encode("utf-8"))
             if selected_bytes > budget:
                 selected = selected.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
